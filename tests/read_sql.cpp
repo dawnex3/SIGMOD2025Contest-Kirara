@@ -1263,8 +1263,13 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // build context
+        auto runtime = size_t{0};
+
+        // Build context. Context creation time is included in the measured runtime.
+        const auto start_context = std::chrono::steady_clock::now();
         auto* context = Contest::build_context();
+	const auto end_context = std::chrono::steady_clock::now();
+        runtime += std::chrono::duration_cast<std::chrono::microseconds>(end_context - start_context).count();
 
         // load plan json
         namespace fs = std::filesystem;
@@ -1284,7 +1289,7 @@ int main(int argc, char* argv[]) {
         auto sql_directory = query_plans["sql_directory"].get<std::string>();
         auto names         = query_plans["names"].get<std::vector<std::string>>();
         auto plans         = query_plans["plans"];
-	auto runtime = size_t{0};
+	
 	auto all_queries_succeeded = true;
         for (const auto& [name, plan_json]: views::zip(names, plans)) {
             if ((argc < 3 || (selected_plans.find(name) != selected_plans.end())) ||
