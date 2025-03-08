@@ -256,7 +256,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 
     // 启动所有线程
     int barrier_group = -1;
-    for (int i = 0; i < thread_num; ++i) {
+    for (int i = 0; i < thread_num - 1; ++i) {
         if (i % Barrier::threads_per_barrier_ == 0) barrier_group++;    // 每threads_per_barrier_个线程属于一个barrier_group
 
         threads.emplace_back([&plan, &shared_manager, &result, &barriers, &barrier_group]() {

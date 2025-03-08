@@ -1,3 +1,10 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
+#include <stdexcept>
+#include <sys/types.h>
 #include <vector>
 #include "SharedState.hpp"
 #include "attribute.h"
@@ -8,6 +15,50 @@
 
 namespace Contest {
 
+#define FULL_INT32_PAGE 1984
+
+#define NULL_INT32 -2147483648
+
+#define NULL_VARCHAR 0
+
+struct varchar_ptr {
+    uint64_t ptr = {0};
+
+    varchar_ptr(const char *str, uint16_t length) {
+      set(str, length);
+    }
+    inline varchar_ptr() = default;
+    inline void set(const char *str, uint16_t length) {
+        ptr = ((uint64_t)length << 48) | (uint64_t)(str);
+    }
+    inline const char *string() {
+        return (const char *)(ptr & 0x0000FFFFFFFFFFFF);
+    }
+    inline uint16_t length() {
+        return (uint16_t)(ptr >> 48);
+    }
+    inline bool is_null() {
+        return ptr == NULL_VARCHAR;
+    }
+};
+
+void set_bitmap(std::vector<uint8_t>& bitmap, uint16_t idx) {
+    while (bitmap.size() < idx / 8 + 1) {
+        bitmap.emplace_back(0);
+    }
+    auto byte_idx     = idx / 8;
+    auto bit          = idx % 8;
+    bitmap[byte_idx] |= (1u << bit);
+}
+
+void unset_bitmap(std::vector<uint8_t>& bitmap, uint16_t idx) {
+    while (bitmap.size() < idx / 8 + 1) {
+        bitmap.emplace_back(0);
+    }
+    auto byte_idx     = idx / 8;
+    auto bit          = idx % 8;
+    bitmap[byte_idx] &= ~(1u << bit);
+}
 
 // 调用算子next得到的结果表。每一列可能是已经实例化的，也有可能只是给出了在原表中的行号。
 // SCAN算子给出的结果都是未实例化的，并且是一段连续的行号。
@@ -109,11 +160,7 @@ size_t getNonNullCount(const uint8_t* bitmap, uint16_t n) {
     return count;
 }
 
-#define FULL_INT32_PAGE 1984
 
-#define NULL_INT32 -2147483648
-
-#define NULL_VARCHAR 0
 
 class Operator {
 public:
@@ -743,20 +790,120 @@ public:
 
             // 将每一列写入page_buffers_
             for(size_t i=0; i<child_result.columns_.size(); i++){
-                auto column = std::get<OperatorResultTable::InstantiatedColumn>(child_result.columns_[i]);
+                auto from_column = std::get<OperatorResultTable::InstantiatedColumn>(child_result.columns_[i]);
+                auto rows = child_result.num_rows_; 
                 std::vector<Page*>& pages = page_buffers_[i];
-                if(column.first==DataType::INT32){
-                    const int32_t *base = (int32_t*)column.second;
-                    for(size_t j=0; j<row_num; j++){
 
+                if(from_column.first==DataType::INT32){
+                    int32_t *fomr_data = (int32_t*)from_column.second;
+                    uint16_t             to_num_rows = 0;
+                    std::vector<int32_t> to_data;
+                    std::vector<uint8_t> to_bitmap;
+                    to_data.reserve(2048);
+                    to_bitmap.reserve(256);
+                    auto gen_page = [&pages, &to_num_rows, &to_data, &to_bitmap]() {
+                        auto* page                             = new Page;
+                        *reinterpret_cast<uint16_t*>(page->data)     = to_num_rows;
+                        *reinterpret_cast<uint16_t*>(page->data + 2) = static_cast<uint16_t>(to_data.size());
+                        memcpy(page->data + 4, to_data.data(), to_data.size() * 4);
+                        memcpy(page->data + PAGE_SIZE - to_bitmap.size(), to_bitmap.data(), to_bitmap.size());
+                        to_num_rows = 0;
+                        to_data.clear();
+                        to_bitmap.clear();
+                        pages.push_back(page);
+                    };
+                    for (size_t j = 0; j < rows; ++j) {
+                        int value = fomr_data[j];
+                        if (value != NULL_INT32) {
+                            if (4 + (to_data.size() + 1) * 4 + (to_num_rows / 8 + 1) > PAGE_SIZE) {
+                                gen_page();
+                            }
+                            set_bitmap(to_bitmap, to_num_rows);
+                            to_data.emplace_back(value);
+                            ++to_num_rows;
+                        } else {
+                            if (4 + (to_data.size()) * 4 + (to_num_rows / 8 + 1) > PAGE_SIZE) {
+                                gen_page();
+                            }
+                            unset_bitmap(to_bitmap, to_num_rows);
+                            ++to_num_rows;
+                        }
                     }
+                    if (to_num_rows != 0) {
+                        gen_page();
+                    }
+                    continue;
+                } else if (from_column.first==DataType::VARCHAR){
+                    varchar_ptr *fomr_data = (varchar_ptr *)from_column.second;
+                    uint16_t              num_rows = 0;
+                    std::vector<char>     data;
+                    std::vector<uint16_t> offsets;
+                    std::vector<uint8_t>  bitmap;
+                    data.reserve(8192);
+                    offsets.reserve(4096);
+                    bitmap.reserve(512);
+                    auto save_page = [&pages, &num_rows, &data, &offsets, &bitmap]() {
+                        auto* page                             = new Page;
+                        *reinterpret_cast<uint16_t*>(page->data)     = num_rows;
+                        *reinterpret_cast<uint16_t*>(page->data + 2) = static_cast<uint16_t>(offsets.size());
+                        memcpy(page->data + 4, offsets.data(), offsets.size() * 2);
+                        memcpy(page->data + 4 + offsets.size() * 2, data.data(), data.size());
+                        memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
+                        num_rows = 0;
+                        data.clear();
+                        offsets.clear();
+                        bitmap.clear();
+                        pages.push_back(page);
+                    };
+                    for (int j = 0; j < rows; ++j) {
+                        auto value = fomr_data[j];
+                        if (!value.is_null()) {
+                            if (value.length() > PAGE_SIZE - 7) {
+                                throw std::runtime_error("long string is not support");
+                            } else {
+                                if (4 + (offsets.size() + 1) * 2 + (data.size() + value.length())
+                                        + (num_rows / 8 + 1)
+                                    > PAGE_SIZE) {
+                                    save_page();
+                                }
+                                set_bitmap(bitmap, num_rows);
+                                data.insert(data.end(), value.string(), value.string() + value.length());
+                                offsets.emplace_back(data.size());
+                                ++num_rows;
+                            }
+                        } else {
+                            if (4 + offsets.size() * 2 + data.size() + (num_rows / 8 + 1)
+                                > PAGE_SIZE) {
+                                save_page();
+                            }
+                            unset_bitmap(bitmap, num_rows);
+                            ++num_rows;
+                        }
+                    }
+                    if (num_rows != 0) {
+                        save_page();
+                    }
+                    continue;
+                } else {
+                    throw std::runtime_error("Unsupported data type");
                 }
             }
             found += row_num;
-
         }
 
         // 申请shared_.output_的锁...
+        {
+            std::lock_guard lock(shared_.m_);
+            for(size_t i=0; i<shared_.output_.columns.size(); i++){
+                auto& column = shared_.output_.columns[i];
+                column.pages.insert(column.pages.end(),
+                    page_buffers_[i].begin(), page_buffers_[i].end());
+            }
+        }
+
+        for (auto& pages : page_buffers_) {
+            pages.clear();
+        }
     }
 
 };
