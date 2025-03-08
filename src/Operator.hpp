@@ -275,9 +275,9 @@ private:
         Hashmap::hash_t probe_hash_{0};        // 上次未探测完的哈希值
         Hashmap::EntryHeader* last_chain_{nullptr};  // 上次未完成的哈希链表
 
-        // 额外的状态，专门用于joinSelParallel
-        uint32_t followup_{0};
-        uint32_t followup_write_{0};
+        // 额外的状态，指示循环队列的开始和结束位置。专门用于joinSelParallel
+        uint32_t queue_begin_{0};
+        uint32_t queue_end_{0};
 
         size_t num_probe_{0};              // right_result_的大小
         size_t next_probe_{0};             // right_result_中接下来要处理的行
@@ -308,6 +308,12 @@ private:
 
     std::vector<std::pair<uint8_t*, size_t>> allocations_;  // 存储多个哈希表条目数组<数组指针，数组大小>
 
+
+    // 专门用于joinSelParallel的循环队列
+    size_t circular_queue_size_{1025};      // 循环队列大小
+    uint32_t *queue_probe_;                 // 探测侧的循环队列，存储行号
+    Hashmap::EntryHeader** queue_build_;    // 构建侧的循环队列，指向Entry
+
 public:
 
     Hashjoin(Shared& shared, size_t vec_size, std::unique_ptr<Operator> left, size_t left_idx,
@@ -317,6 +323,7 @@ public:
     right_(std::move(right)), right_idx_(right_idx){
         // 计算ht_entry_size_和build_value_offsets_
         // 为了满足对齐的需求，并且让整个entry最小，需要对左表的列顺序重新排列，将int32_t放到前面，uint64_t放到后面
+        build_value_offsets_.resize(left_attrs.size());
         ht_entry_size_ = (sizeof(Hashmap::EntryHeader) + 3) & ~3;   // 将EntryHeader大小补齐到4倍数
         for(uint32_t i=0; i<left_attrs.size(); i++){
             if(std::get<1>(left_attrs[i])==DataType::INT32){
@@ -350,6 +357,9 @@ public:
             }
         }
 
+        // 分配循环队列的内存
+        queue_probe_ = (uint32_t*)malloc(circular_queue_size_*sizeof(uint32_t));
+        queue_build_ = (Hashmap::EntryHeader**)malloc(circular_queue_size_*sizeof(Hashmap::EntryHeader*));
     }
 
     ~Hashjoin() override{
@@ -366,6 +376,10 @@ public:
         for(auto [entrys,_]:allocations_){
             free(entrys);
         }
+
+        // 销毁循环队列
+        free(queue_probe_);
+        free(queue_build_);
     }
 
     size_t resultColumnNum() override{
@@ -693,8 +707,7 @@ public:
     }
 
 
-
-    /// 匹配哈希值相等的Entry和右侧行，存入buildMatches和probeMatches
+    // 匹配哈希值相等的Entry和右侧行，存入buildMatches和probeMatches
     uint32_t joinAll(){
         size_t found = 0;
         // 处理上次未完成的哈希链表
@@ -736,7 +749,69 @@ public:
 
     /// computes join result into buildMatches and probeMatches
     /// Implementation: optimized for long CPU pipelines
-    uint32_t joinAllParallel();
+    uint32_t joinAllParallel(){
+        size_t found = 0;
+        auto followup = cont_.queue_begin_;   // 队列读指针
+        auto followupWrite = cont_.queue_end_;   // 队列写指针
+
+        if (followup == followupWrite) {       // 当循环队列为空的时候
+            for (size_t i = 0, end = cont_.num_probe_; i < end; ++i) {    // 遍历该批次所有探测元组
+                auto hash = probe_hashes_[i];
+                auto entry = shared_.hashmap_.find_chain_tagged(hash);
+                if (entry != nullptr) {        // 匹配项添加到buildMatches和probeMatches
+                    if (entry->hash == hash) {
+                        build_matches_[found] = entry;
+                        probe_matches_[found] = i;
+                        found += 1;
+                    }
+                    if (entry->next != nullptr) {  // 添加id-entry对到循环队列
+                        queue_probe_[followupWrite] = i;
+                        queue_build_[followupWrite] = entry->next;
+                        followupWrite += 1;
+                    }
+                }
+            }
+        }
+
+        followupWrite %= circular_queue_size_;
+
+        while (followup != followupWrite) {          // 消耗直至队列为空
+            auto remainingSpace = vec_size_ - found;  // 该批次的剩余容量
+            auto nrFollowups = followup <= followupWrite
+                                    ? followupWrite - followup
+                                    : circular_queue_size_ - (followup - followupWrite);  // 队列的大小
+            // std::cout << "nrFollowups: " << nrFollowups << "\n";
+            auto fittingElements = std::min((size_t)nrFollowups, remainingSpace);   // fittingElements是所能处理的最大数目
+            for (size_t j = 0; j < fittingElements; ++j) {
+                size_t i = queue_probe_[followup];
+                auto entry = queue_build_[followup];
+                // followup = (followup + 1) % followupBufferSize;
+                followup = (followup + 1);
+                if (followup == circular_queue_size_) followup = 0;
+                auto hash = probe_hashes_[i];      // 取出队列最前端
+                if (entry->hash == hash) {
+                    build_matches_[found] = entry;
+                    probe_matches_[found++] = i;
+                }
+                if (entry->next != nullptr) {  // 向队列尾部添加元素
+                    queue_probe_[followupWrite] = i;
+                    queue_build_[followupWrite] = entry->next;
+                    followupWrite = (followupWrite + 1) % circular_queue_size_;
+                }
+            }
+            if (fittingElements < nrFollowups) {   // 当remainingSpace < nrFollowups时，会在此提前结束该批次。尽管批次可能未满。
+                // continuation
+                cont_.queue_end_ = followupWrite;
+                cont_.queue_begin_ = followup;
+                return found;
+            }
+        }
+        cont_.next_probe_ = cont_.num_probe_;
+        cont_.queue_end_ = 0;
+        cont_.queue_begin_ = 0;
+        return found;
+    }
+
     // join implementation after Peter's suggestions
     uint32_t joinBoncz();
     /// computes join result into buildMatches and probeMatches
