@@ -10,6 +10,7 @@
 #include <variant>
 #include <vector>
 #include <iostream>
+#include <fstream>
 #include "Profiler.hpp"
 #include "SharedState.hpp"
 #include "attribute.h"
@@ -17,209 +18,10 @@
 #include "plan.h"
 #include "HashMap.hpp"
 #include "Barrier.hpp"
+#include "DataStructure.hpp"
 
 namespace Contest {
 //#define DEBUG_LOG
-
-#define FULL_INT32_PAGE 1984
-
-#define NULL_INT32 -2147483648
-
-#define NULL_VARCHAR 0
-
-struct varchar_ptr {
-    uint64_t ptr = {0};
-
-    varchar_ptr(const char *str, uint16_t length) {
-      set(str, length);
-    }
-    inline varchar_ptr() = default;
-    inline void set(const char *str, uint16_t length) {
-        ptr = ((uint64_t)length << 48) | (uint64_t)(str);
-    }
-    inline const char *string() const{
-        return (const char *)(ptr & 0x0000FFFFFFFFFFFF);
-    }
-    inline uint16_t length() const{
-        return (uint16_t)(ptr >> 48);
-    }
-    inline bool is_null() const{
-        return ptr == NULL_VARCHAR;
-    }
-};
-
-void set_bitmap(std::vector<uint8_t>& bitmap, uint16_t idx) {
-    while (bitmap.size() < idx / 8 + 1) {
-        bitmap.emplace_back(0);
-    }
-    auto byte_idx     = idx / 8;
-    auto bit          = idx % 8;
-    bitmap[byte_idx] |= (1u << bit);
-}
-
-void unset_bitmap(std::vector<uint8_t>& bitmap, uint16_t idx) {
-    while (bitmap.size() < idx / 8 + 1) {
-        bitmap.emplace_back(0);
-    }
-    auto byte_idx     = idx / 8;
-    auto bit          = idx % 8;
-    bitmap[byte_idx] &= ~(1u << bit);
-}
-
-// 调用算子next得到的结果表。每一列可能是已经实例化的，也有可能只是给出了在原表中的行号。
-// SCAN算子给出的结果都是未实例化的，并且是一段连续的行号。
-// JOIN算子会将链接键值实例化。
-class OperatorResultTable {
-public:
-    // 总共的行数
-    size_t num_rows_{0};
-
-    // 定义三种列类型：
-    // 1. 已实例化的列，以 std::pair<DataType, void*> 表示，
-    //    表示列的数据已经实例化，并提供该列的数据指针。
-    using InstantiatedColumn = std::pair<DataType, void*>;
-
-    // 2. 未实例化且行号连续的列，以 std::pair<Column *, uint32_t> 表示，
-    //    表示引用的原始列，以及起始行所在的页码，以及起始行在该页之内的位置。
-    using ContinuousColumn = std::tuple<const Column *, uint32_t, uint32_t>;
-
-    // 3. 未实例化且行号不连续的列，以 std::pair<Column *, uint32_t *> 表示，
-    //    表示引用的原始列，以及存储这些不连续行号的数组（多个未实例化列的行号可能完全相同，因而指向同一个行号数组）。
-    //    这个类被弃用了，因为从NonContinuousColumn读取实际值的代价很大，有很多的随机访问，还需要计算行号。
-    //    using NonContinuousColumn = std::pair<Column *, uint32_t *>;
-
-    // 将以上三种列类型组合成一个 std::variant 类型
-    using ColumnVariant = std::variant<InstantiatedColumn, ContinuousColumn>;
-
-    // 存储所有列的变体集合
-    std::vector<ColumnVariant> columns_;
-
-    inline bool isEmpty() const{
-        return num_rows_==0;
-    };
-
-    // 打印出该表。目前只支持列全部为InstantiatedColumn的情况
-    void print() const {
-        std::cout << toString(); // 直接输出 toString 的结果
-    }
-
-    std::string toString(bool head=true) const {
-        std::ostringstream oss;
-
-        // 添加表头信息
-        if(head){
-            oss << "table size: " << num_rows_ << " rows * " << columns_.size() << " cols\n";
-        }
-
-        // 构建列信息
-        std::vector<std::variant<const int32_t*, const varchar_ptr*>> cols;
-        for (const ColumnVariant& column_variant : columns_) {
-            auto col = std::get<InstantiatedColumn>(column_variant);
-            if (col.first == DataType::INT32) {
-                cols.emplace_back(reinterpret_cast<const int32_t*>(col.second));
-            } else if (col.first == DataType::VARCHAR) {
-                cols.emplace_back(reinterpret_cast<const varchar_ptr*>(col.second));
-            } else {
-                throw std::runtime_error("Unsupported data type");
-            }
-        }
-
-        // 构建行信息
-        for (size_t i = 0; i < num_rows_; i++) {
-            for (auto col_ptr : cols) {
-                std::visit([&](auto&& ptr) {
-                    using T = std::decay_t<decltype(ptr)>;
-                    if constexpr (std::is_same_v<T, const int32_t*>) {
-                        if(ptr[i]!=NULL_INT32){
-                            oss << ptr[i] << "\t\t";
-                        } else {
-                            oss << "NULL" << "\t\t";
-                        }
-                    } else {
-                        if(!ptr[i].is_null()){
-                            oss << std::string(ptr[i].string(), ptr[i].length()) << "\t\t";
-                        } else {
-                            oss << "NULL" << "\t\t";
-                        }
-                    }
-                }, col_ptr);
-            }
-            oss << "\n"; // 换行
-        }
-
-        return oss.str(); // 返回构建的字符串
-    }
-};
-
-
-// 一些辅助读取Column信息的函数
-// 获取页面的总行数（含NULL值）
-inline uint16_t getRowCount(const Page* page) {
-    return *reinterpret_cast<const uint16_t*>(page->data);
-}
-
-// 获取页面的非NULL值数量
-inline uint16_t getNonNullCount(const Page* page) {
-    return *reinterpret_cast<const uint16_t*>(page->data + 2);
-}
-
-// 一个页中数据区域起始指针
-template<typename T>
-inline const T* getPageData(const Page* page) {
-    if constexpr (std::is_same_v<T, int32_t>) {
-        return reinterpret_cast<const int32_t*>(page->data + 4);
-    } else if constexpr (std::is_same_v<T, int64_t>) {
-        return reinterpret_cast<const int64_t*>(page->data + 8);
-    } else if constexpr (std::is_same_v<T, double>) {
-        return reinterpret_cast<const double*>(page->data + 8);
-    } else if constexpr (std::is_same_v<T, char>) {
-        return reinterpret_cast<const char*>(page->data + 4 + getNonNullCount(page) * 2);
-    } else {
-        // 编译时静态断言：不支持的类型
-        static_assert(std::is_same_v<T, void>, "Unsupported type: T must be int32_t or char");
-        return nullptr;
-    }
-}
-
-// 获取位图
-inline const uint8_t* getBitmap(const Page* page){
-    return reinterpret_cast<const uint8_t*>(page->data + PAGE_SIZE - (getRowCount(page) + 7) / 8);
-}
-
-// 获取VARCHAR页面中的偏移数组的指针
-inline const uint16_t* getVarcharOffset(const Page* page) {
-    return reinterpret_cast<const uint16_t*>(page->data + 4);
-}
-
-// 位图中idx号元素是否为NULL
-inline bool isNotNull(const uint8_t* bitmap, uint16_t idx) {
-    auto byte_idx = idx / 8;
-    auto bit      = idx % 8;
-    return bitmap[byte_idx] & (1u << bit);
-}
-
-// 计算位图的前n个元素有多少个不为NULL
-size_t getNonNullCount(const uint8_t* bitmap, uint16_t n) {
-    int count = 0;
-    uint16_t full_bytes = n / 8;
-    uint8_t remaining_bits = n % 8;
-
-    // 统计完整字节中的 1 的位数
-    for (uint16_t i = 0; i < full_bytes; ++i) {
-        count += __builtin_popcount(bitmap[i]);
-    }
-
-    // 处理剩余位
-    if (remaining_bits > 0) {
-        uint8_t last_byte = bitmap[full_bytes];
-        uint8_t mask = (1 << remaining_bits) - 1; // 保留低 remaining_bits 位
-        count += __builtin_popcount(last_byte & mask);
-    }
-
-    return count;
-}
-
-
 
 class Operator {
 public:
@@ -277,7 +79,7 @@ public:
 
     OperatorResultTable next() override{
         size_t skip_rows;       // 本次调用，相比于上次跳过的行数
-        ProfileGuard profile_guard(global_profiler, "Scan_" + std::to_string(shared_.get_operator_id()));
+        //ProfileGuard profile_guard(global_profiler, "Scan_" + std::to_string(shared_.get_operator_id()));
 
         if (vec_in_chunk_ == chunk_size_) {     // 如果本块已经处理完，取出新的一块，更新全局状态
             size_t current_chunk = shared_.pos_.fetch_add(1); // 取出shared_.pos_的旧值表示当前要处理的块，并加上1
@@ -313,8 +115,9 @@ public:
                 }
             }
             vec_in_chunk_ ++;
-            profile_guard.add_input_row_count(last_result_.num_rows_);
-            profile_guard.add_output_row_count(last_result_.num_rows_);
+            //profile_guard.add_input_row_count(last_result_.num_rows_);
+            //profile_guard.add_output_row_count(last_result_.num_rows_);
+
             return last_result_;
         }
     }
@@ -454,16 +257,15 @@ public:
     }
 
     OperatorResultTable next() override{
-        ProfileGuard profile_guard(global_profiler, "HashJoin_" + std::to_string(shared_.get_operator_id()));
+        //ProfileGuard profile_guard(global_profiler, "HashJoin_" + std::to_string(shared_.get_operator_id()));
 
         if (!is_build_) {     // 构建哈希表
             size_t found = 0;
             while (true){
-                profile_guard.pause();
+                //profile_guard.pause();
                 OperatorResultTable left_table = left_->next(); // 调用左算子
-                profile_guard.resume();
-                profile_guard.add_input_row_count( left_table.num_rows_);
-
+                //profile_guard.resume();
+                //profile_guard.add_input_row_count( left_table.num_rows_);                profile_guard.add_input_row_count( left_table.num_rows_);
                 size_t n = left_table.num_rows_;
                 if(n==0) break;
                 found += n;
@@ -487,12 +289,12 @@ public:
 
 
             shared_.found_.fetch_add(found);   // 加到所有线程的总found上
-            profile_guard.pause();
+            //profile_guard.pause();
             current_barrier->wait([&]() {   // 等待所有线程完成计算，确定哈希表大小
                 auto total_found = shared_.found_.load();
                 if (total_found) shared_.hashmap_.setSize(total_found);
             });
-            profile_guard.resume();
+            //profile_guard.resume();
             auto total_found = shared_.found_.load();
             if (total_found == 0) {
                 is_build_ = true;
@@ -506,26 +308,30 @@ public:
                     reinterpret_cast<Hashmap::EntryHeader*>(ht_entrys), n, ht_entry_size_);
             }
             is_build_ = true;
-            profile_guard.pause();
+            //profile_guard.pause();
             current_barrier->wait(); // 等待所有线程插入哈希表
-            profile_guard.resume();
+            //profile_guard.resume();
         }
 
         // 探测阶段
         while (true) {
             if (cont_.next_probe_ >= cont_.num_probe_) {
-                profile_guard.pause();
+                //profile_guard.pause();
                 right_result_ = right_->next();     // 调用右侧算子，结果保存到right_result_
-                profile_guard.resume();
-                profile_guard.add_input_row_count(right_result_.num_rows_);
+                //profile_guard.resume();
+                //profile_guard.add_input_row_count(right_result_.num_rows_);
                 cont_.next_probe_ = 0;
                 cont_.num_probe_ = right_result_.num_rows_;
                 if (cont_.num_probe_ == 0) {
                     last_result_.num_rows_ = 0;
 #ifdef DEBUG_LOG
                     // 打印该节点输出的总行数
-                    printf("join output rows: %ld, details:\n",total_output);
-                    std::cout<<table_str<<std::endl;
+//                    printf("join output rows: %ld, details:\n",total_output);
+//                    std::cout<<table_str<<std::endl;
+                    std::ofstream log("log.txt", std::ios::app);
+                    log << "join output rows: " << total_output << ", details:\n";
+                    log << table_str <<std::endl;
+                    log.close();
 #endif
                     return last_result_;
                 }
@@ -552,7 +358,7 @@ public:
                         (uint8_t*)column.second,column.first==DataType::INT32 ? 4:8,probe_matches_);
                 }
             }
-            profile_guard.add_output_row_count(n);
+            //profile_guard.add_output_row_count(n);
 #ifdef DEBUG_LOG
             total_output += n;
             table_str.append(last_result_.toString(false));
@@ -652,10 +458,12 @@ public:
                             col_target += col_step;
                         }
                         n -= num_rows;
-                        current_page++;
-                        base = getPageData<int32_t>(*current_page);
-                        bitmap = getBitmap(*current_page);
-                        num_rows = std::min((size_t)getRowCount(*current_page), n);
+                        if(n>0){
+                            current_page++;
+                            base = getPageData<int32_t>(*current_page);
+                            bitmap = getBitmap(*current_page);
+                            num_rows = std::min((size_t)getRowCount(*current_page), n);
+                        }
                     } while (n>0);
                 } else if(col->type==DataType::VARCHAR){
                     const uint8_t* bitmap = getBitmap(*current_page);
@@ -676,11 +484,13 @@ public:
                             col_target += col_step;
                         }
                         n -= num_rows;
-                        current_page++;
-                        bitmap = getBitmap(*current_page);
-                        num_rows = std::min((size_t)getRowCount(*current_page), n);
-                        str_end = getVarcharOffset(*current_page);
-                        str_begin = 0;
+                        if(n>0){
+                            current_page++;
+                            bitmap = getBitmap(*current_page);
+                            num_rows = std::min((size_t)getRowCount(*current_page), n);
+                            str_end = getVarcharOffset(*current_page);
+                            str_begin = 0;
+                        }
                     } while (n>0);
                 }
             } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn> & SpecifiedIndex){
@@ -815,7 +625,7 @@ public:
             }
         }
         if (cont_.last_chain_ != nullptr){
-            cont_.next_probe_++;    // 此时上次的哈希链表已经处理完成了。next_probe_推进一行，除了cont_.last_chain_==null的情况（也就是第一次执行）
+            cont_.next_probe_++;    // 如果cont_.last_chain_==null，说明刚刚处理了上次未处理完的哈希链。此时上次的哈希链表已经处理完成了，next_probe_推进一行。
         }
         for (size_t i = cont_.next_probe_, end = cont_.num_probe_; i < end; i++) {
             Hashmap::hash_t hash = probe_hashes_[i];
@@ -824,12 +634,18 @@ public:
                     build_matches_[found] = entry;              // 记录左表（哈希表）匹配的EntryHeader
                     probe_matches_[found] = i;  // 记录右表匹配的行号
                     found ++;
-                    if (found == vec_size_ && (entry->next != nullptr || i + 1 < end)) {
-                        // output buffers are full, save state for continuation
-                        cont_.last_chain_ = entry->next;
-                        cont_.probe_hash_ = hash;
-                        cont_.next_probe_ = i;
-                        return vec_size_;
+                    if (found == vec_size_) {
+                        // 缓冲已满，保存状态等待下次调用
+                        if(entry->next != nullptr){ //如果本次的哈希链没有处理完毕
+                            cont_.last_chain_ = entry->next;
+                            cont_.probe_hash_ = hash;
+                            cont_.next_probe_ = i;
+                            return vec_size_;
+                        } else if (i + 1 < end){    //本次哈希链已处理完，但是后面还有待probe的hash
+                            cont_.last_chain_ = nullptr;
+                            cont_.next_probe_ = i+1;
+                            return vec_size_;
+                        }
                     }
                 }
             }
@@ -1005,7 +821,7 @@ public:
         }
 
         Page *dump_page() override {
-            Page *result_page = page; 
+            Page *result_page = page;
             memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
             bitmap.clear();
             page = nullptr;
@@ -1032,7 +848,7 @@ public:
         }
 
         bool can_store_string(const varchar_ptr value) {
-            if (value.is_null()) {
+            if (value.isNull()) {
                 return 4 + offsets.size() * 2 + data.size() + (num_rows / 8 + 1) <= PAGE_SIZE;
             } else {
                 return 4 + (offsets.size() + 1) * 2 + (data.size() + value.length()) + (num_rows / 8 + 1) <= PAGE_SIZE;
@@ -1048,7 +864,7 @@ public:
                 throw std::runtime_error("long string is not support");
             }
 #endif
-            if (value.is_null()) {
+            if (value.isNull()) {
                 unset_bitmap(bitmap, num_rows);
                 ++num_rows;
             } else {
@@ -1102,10 +918,9 @@ public:
         while(true){
             OperatorResultTable child_result = child_->next();
             size_t row_num = child_result.num_rows_;
-            ProfileGuard profile(global_profiler, "resultwriter");
-            global_profiler->add_input_row_count("resultwriter", row_num);
-            global_profiler->add_output_row_count("resultwriter", row_num);
-
+            //ProfileGuard profile(global_profiler, "resultwriter");
+            //global_profiler->add_input_row_count("resultwriter", row_num);            global_profiler->add_input_row_count("resultwriter", row_num);
+            //global_profiler->add_output_row_count("resultwriter", row_num);            global_profiler->add_output_row_count("resultwriter", row_num);
             if(row_num==0) break;
 
             // 将每一列写入page_buffers_
@@ -1128,7 +943,7 @@ public:
                 } else if (from_column.first==DataType::VARCHAR){
                     TempStringPage *temp = (TempStringPage *)unfilled_page_[i].get();
                     varchar_ptr *fomr_data = (varchar_ptr *)from_column.second;
-                    
+
                     for (int j = 0; j < rows; ++j) {
                         auto value = fomr_data[j];
                         if (!temp->can_store_string(value)) {
@@ -1143,7 +958,7 @@ public:
             }
             found += row_num;
         }
-        
+
         for (int i = 0; i < shared_.output_.columns.size(); ++i) {
             auto temp = unfilled_page_[i].get();
             if (!temp->is_empty()) {
@@ -1151,6 +966,7 @@ public:
             }
         }
 
+        // 申请shared_.output_的锁...
         {
             std::lock_guard lock(shared_.m_);
             shared_.output_.num_rows += found;
