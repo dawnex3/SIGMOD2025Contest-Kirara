@@ -128,9 +128,17 @@ public:
                 std::visit([&](auto&& ptr) {
                     using T = std::decay_t<decltype(ptr)>;
                     if constexpr (std::is_same_v<T, const int32_t*>) {
-                        oss << ptr[i] << "\t\t"; // INT32 类型的值
+                        if(ptr[i]!=NULL_INT32){
+                            oss << ptr[i] << "\t\t";
+                        } else {
+                            oss << "NULL" << "\t\t";
+                        }
                     } else {
-                        oss << std::string(ptr[i].string(), ptr[i].length()) << "\t\t"; // VARCHAR 类型的值
+                        if(!ptr[i].is_null()){
+                            oss << std::string(ptr[i].string(), ptr[i].length()) << "\t\t";
+                        } else {
+                            oss << "NULL" << "\t\t";
+                        }
                     }
                 }, col_ptr);
             }
@@ -685,7 +693,7 @@ public:
                 } else if(col->type==DataType::VARCHAR){
                     for(uint32_t i=0; i<n; i++){
                         // 定位到probe_matches_[i]所在的Page，和页内偏移
-                        while(offset > getRowCount(*current_page)){
+                        while(offset >= getRowCount(*current_page)){
                             offset -= getRowCount(*current_page);
                             current_page++;
                             bitmap = getBitmap(*current_page);
