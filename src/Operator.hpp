@@ -10,6 +10,7 @@
 #include <variant>
 #include <vector>
 #include <iostream>
+#include "Profiler.hpp"
 #include "SharedState.hpp"
 #include "attribute.h"
 #include "statement.h"
@@ -276,6 +277,7 @@ public:
 
     OperatorResultTable next() override{
         size_t skip_rows;       // 本次调用，相比于上次跳过的行数
+        ProfileGuard profile_guard(global_profiler, "Scan_" + std::to_string(shared_.get_operator_id()));
 
         if (vec_in_chunk_ == chunk_size_) {     // 如果本块已经处理完，取出新的一块，更新全局状态
             size_t current_chunk = shared_.pos_.fetch_add(1); // 取出shared_.pos_的旧值表示当前要处理的块，并加上1
@@ -311,6 +313,8 @@ public:
                 }
             }
             vec_in_chunk_ ++;
+            profile_guard.add_input_row_count(last_result_.num_rows_);
+            profile_guard.add_output_row_count(last_result_.num_rows_);
             return last_result_;
         }
     }
@@ -450,10 +454,16 @@ public:
     }
 
     OperatorResultTable next() override{
+        ProfileGuard profile_guard(global_profiler, "HashJoin_" + std::to_string(shared_.get_operator_id()));
+
         if (!is_build_) {     // 构建哈希表
             size_t found = 0;
             while (true){
+                profile_guard.pause();
                 OperatorResultTable left_table = left_->next(); // 调用左算子
+                profile_guard.resume();
+                profile_guard.add_input_row_count( left_table.num_rows_);
+
                 size_t n = left_table.num_rows_;
                 if(n==0) break;
                 found += n;
@@ -500,7 +510,10 @@ public:
         // 探测阶段
         while (true) {
             if (cont_.next_probe_ >= cont_.num_probe_) {
+                profile_guard.pause();
                 right_result_ = right_->next();     // 调用右侧算子，结果保存到right_result_
+                profile_guard.resume();
+                profile_guard.add_input_row_count(right_result_.num_rows_);
                 cont_.next_probe_ = 0;
                 cont_.num_probe_ = right_result_.num_rows_;
                 if (cont_.num_probe_ == 0) {
@@ -535,6 +548,7 @@ public:
                         (uint8_t*)column.second,column.first==DataType::INT32 ? 4:8,probe_matches_);
                 }
             }
+            profile_guard.add_output_row_count(n);
 #ifdef DEBUG_LOG
             total_output += n;
             table_str.append(last_result_.toString(false));
@@ -930,7 +944,7 @@ public:
         std::vector<uint8_t> bitmap;
         Page *page = nullptr;
         void alloc_page() {
-#ifndef NDEBUG
+#ifndef NOTDEBUG
             if (page != nullptr) {
                 throw std::runtime_error("page is not null");
             }
@@ -968,7 +982,7 @@ public:
         }
 
         void add_row(int value) {
-#ifndef NDEBUG
+#ifndef NOTDEBUG
             if (is_full()) {
                 throw std::runtime_error("page is full");
             }
@@ -1022,7 +1036,7 @@ public:
         }
 
         void add_row(const varchar_ptr value) {
-#ifndef NDEBUG
+#ifndef NOTDEBUG
             if (!can_store_string(value)) {
                 throw std::runtime_error("page is full");
             }
@@ -1084,6 +1098,9 @@ public:
         while(true){
             OperatorResultTable child_result = child_->next();
             size_t row_num = child_result.num_rows_;
+            ProfileGuard profile(global_profiler, "resultwriter");
+            global_profiler->add_input_row_count("resultwriter", row_num);
+            global_profiler->add_output_row_count("resultwriter", row_num);
 
             if(row_num==0) break;
 

@@ -10,7 +10,6 @@
 
 namespace Contest {
 
-Profiler *global_profiler = nullptr;
 
 using ExecuteResult = std::vector<std::vector<Data>>;
 using namespace std::chrono;
@@ -251,7 +250,7 @@ std::unique_ptr<ResultWriter> getPlan(const Plan& plan, SharedStateManager& shar
 }
 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-    const int thread_num = 64;                           // 线程数（包括主线程）
+    const int thread_num = 4;                           // 线程数（包括主线程）
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
     std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
@@ -266,7 +265,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
         if (i == thread_num - 1) {
             [&plan, &shared_manager, &result, &barriers, barrier_group, i]() {
                 global_profiler->set_thread_id(i);
-                global_profiler->event_start("execute");
+                global_profiler->event_begin("execute");
                 auto start = high_resolution_clock::now();
                 // 确定当前线程的Barrier
                 current_barrier = barriers[barrier_group];
@@ -284,7 +283,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
         } else {
             threads.emplace_back(        [&plan, &shared_manager, &result, &barriers, barrier_group, i]() {
                 global_profiler->set_thread_id(i);
-                global_profiler->event_start("execute");
+                global_profiler->event_begin("execute");
                 auto start = high_resolution_clock::now();
                 // 确定当前线程的Barrier
                 current_barrier = barriers[barrier_group];
