@@ -2,9 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <sys/types.h>
+#include <variant>
 #include <vector>
 #include <iostream>
 #include "SharedState.hpp"
@@ -908,15 +910,138 @@ public:
         }
     };
 
+    struct TempPage {
+        virtual Page *dump_page() = 0;
+        virtual bool is_empty() = 0;
+    };
+
+    struct TempIntPage : public TempPage {
+        uint16_t             num_rows = 0;
+        std::vector<int32_t> data;
+        std::vector<uint8_t> bitmap;
+
+        TempIntPage() {
+            data.reserve(2048);
+            bitmap.reserve(256);
+        }
+
+        bool is_full() {
+            return 4 + (data.size() + 1) * 4 + (num_rows / 8 + 1) > PAGE_SIZE;
+        }
+
+        bool is_empty() override {
+            return num_rows == 0;
+        }
+
+        void add_row(int value) {
+#ifndef NDEBUG
+            if (is_full()) {
+                throw std::runtime_error("page is full");
+            }
+#endif
+            if (value != NULL_INT32) {
+                set_bitmap(bitmap, num_rows);
+                data.emplace_back(value);
+                ++num_rows;
+            } else {
+                unset_bitmap(bitmap, num_rows);
+                ++num_rows;
+            }
+        }
+
+        Page *dump_page() override {
+            auto* page                             = new Page;
+            *reinterpret_cast<uint16_t*>(page->data)     = num_rows;
+            *reinterpret_cast<uint16_t*>(page->data + 2) = static_cast<uint16_t>(data.size());
+            memcpy(page->data + 4, data.data(), data.size() * 4);
+            memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
+            num_rows = 0;
+            data.clear();
+            bitmap.clear();
+            return page;
+        }
+    };
+
+    struct TempStringPage : public TempPage {
+        uint16_t              num_rows = 0;
+        std::vector<char>     data;
+        std::vector<uint16_t> offsets;
+        std::vector<uint8_t>  bitmap;
+
+        TempStringPage() {
+            data.reserve(8192);
+            offsets.reserve(4096);
+            bitmap.reserve(512);
+        }
+
+        bool is_empty() override {
+            return num_rows == 0;
+        }
+
+        bool can_store_string(const varchar_ptr value) {
+            if (value.is_null()) {
+                return 4 + offsets.size() * 2 + data.size() + (num_rows / 8 + 1) <= PAGE_SIZE;
+            } else {
+                return 4 + (offsets.size() + 1) * 2 + (data.size() + value.length()) + (num_rows / 8 + 1) <= PAGE_SIZE;
+            }
+        }
+
+        void add_row(const varchar_ptr value) {
+#ifndef NDEBUG
+            if (!can_store_string(value)) {
+                throw std::runtime_error("page is full");
+            }
+            if (value.length() > PAGE_SIZE - 7) {
+                throw std::runtime_error("long string is not support");
+            }
+#endif
+            if (value.is_null()) {
+                unset_bitmap(bitmap, num_rows);
+                ++num_rows;
+            } else {
+                set_bitmap(bitmap, num_rows);
+                data.insert(data.end(), value.string(), value.string() + value.length());
+                offsets.emplace_back(data.size());
+                ++num_rows;
+            }
+        }
+
+        Page *dump_page() override {
+            auto* page                             = new Page;
+            *reinterpret_cast<uint16_t*>(page->data)     = num_rows;
+            *reinterpret_cast<uint16_t*>(page->data + 2) = static_cast<uint16_t>(offsets.size());
+            memcpy(page->data + 4, offsets.data(), offsets.size() * 2);
+            memcpy(page->data + 4 + offsets.size() * 2, data.data(), data.size());
+            memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
+            num_rows = 0;
+            data.clear();
+            offsets.clear();
+            bitmap.clear();
+        }
+
+    };
+
     Shared& shared_;
 
     std::unique_ptr<Operator> child_;   // 子算子。一般来说是个JOIN
 
     std::vector<std::vector<Page*>> page_buffers_;   // 暂时存储的每一列的page
+    std::vector<std::unique_ptr<TempPage>> unfilled_page_;   // 未满的 Page
 
-    ResultWriter(Shared& shared, std::unique_ptr<Operator> child)
-    : shared_{shared}, page_buffers_(shared.output_.columns.size()), child_(std::move(child))
-    { }
+    ResultWriter(Shared &shared, std::unique_ptr<Operator> child)
+        : shared_{shared}, page_buffers_(shared.output_.columns.size()),
+          child_(std::move(child)),
+          unfilled_page_() {
+            for (size_t i = 0; i < shared.output_.columns.size(); ++i) {
+                if (shared.output_.columns[i].type == DataType::INT32) {
+                    unfilled_page_.emplace_back(std::make_unique<TempIntPage>());
+                } else if (shared.output_.columns[i].type == DataType::VARCHAR) {
+                    unfilled_page_.emplace_back(std::make_unique<TempStringPage>());
+                } else {
+                    throw std::runtime_error("Unsupported data type");
+                }
+            }
+          }
 
     void next(){
         size_t found = 0;
@@ -933,93 +1058,26 @@ public:
                 std::vector<Page*>& pages = page_buffers_[i];
 
                 if(from_column.first==DataType::INT32){
-                    int32_t *fomr_data = (int32_t*)from_column.second;
-                    uint16_t             to_num_rows = 0;
-                    std::vector<int32_t> to_data;
-                    std::vector<uint8_t> to_bitmap;
-                    to_data.reserve(2048);
-                    to_bitmap.reserve(256);
-                    auto gen_page = [&pages, &to_num_rows, &to_data, &to_bitmap]() {
-                        auto* page                             = new Page;
-                        *reinterpret_cast<uint16_t*>(page->data)     = to_num_rows;
-                        *reinterpret_cast<uint16_t*>(page->data + 2) = static_cast<uint16_t>(to_data.size());
-                        memcpy(page->data + 4, to_data.data(), to_data.size() * 4);
-                        memcpy(page->data + PAGE_SIZE - to_bitmap.size(), to_bitmap.data(), to_bitmap.size());
-                        to_num_rows = 0;
-                        to_data.clear();
-                        to_bitmap.clear();
-                        pages.push_back(page);
-                    };
+                    TempIntPage *temp = (TempIntPage *)unfilled_page_[i].get();
+                    int32_t *form_data = (int32_t*)from_column.second;
+
                     for (size_t j = 0; j < rows; ++j) {
-                        int value = fomr_data[j];
-                        if (value != NULL_INT32) {
-                            if (4 + (to_data.size() + 1) * 4 + (to_num_rows / 8 + 1) > PAGE_SIZE) {
-                                gen_page();
-                            }
-                            set_bitmap(to_bitmap, to_num_rows);
-                            to_data.emplace_back(value);
-                            ++to_num_rows;
-                        } else {
-                            if (4 + (to_data.size()) * 4 + (to_num_rows / 8 + 1) > PAGE_SIZE) {
-                                gen_page();
-                            }
-                            unset_bitmap(to_bitmap, to_num_rows);
-                            ++to_num_rows;
+                        if (temp->is_full()) {
+                            pages.emplace_back(temp->dump_page());
                         }
-                    }
-                    if (to_num_rows != 0) {
-                        gen_page();
+                        temp->add_row(form_data[j]);
                     }
                     continue;
                 } else if (from_column.first==DataType::VARCHAR){
+                    TempStringPage *temp = (TempStringPage *)unfilled_page_[i].get();
                     varchar_ptr *fomr_data = (varchar_ptr *)from_column.second;
-                    uint16_t              num_rows = 0;
-                    std::vector<char>     data;
-                    std::vector<uint16_t> offsets;
-                    std::vector<uint8_t>  bitmap;
-                    data.reserve(8192);
-                    offsets.reserve(4096);
-                    bitmap.reserve(512);
-                    auto save_page = [&pages, &num_rows, &data, &offsets, &bitmap]() {
-                        auto* page                             = new Page;
-                        *reinterpret_cast<uint16_t*>(page->data)     = num_rows;
-                        *reinterpret_cast<uint16_t*>(page->data + 2) = static_cast<uint16_t>(offsets.size());
-                        memcpy(page->data + 4, offsets.data(), offsets.size() * 2);
-                        memcpy(page->data + 4 + offsets.size() * 2, data.data(), data.size());
-                        memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
-                        num_rows = 0;
-                        data.clear();
-                        offsets.clear();
-                        bitmap.clear();
-                        pages.push_back(page);
-                    };
+                    
                     for (int j = 0; j < rows; ++j) {
                         auto value = fomr_data[j];
-                        if (!value.is_null()) {
-                            if (value.length() > PAGE_SIZE - 7) {
-                                throw std::runtime_error("long string is not support");
-                            } else {
-                                if (4 + (offsets.size() + 1) * 2 + (data.size() + value.length())
-                                        + (num_rows / 8 + 1)
-                                    > PAGE_SIZE) {
-                                    save_page();
-                                }
-                                set_bitmap(bitmap, num_rows);
-                                data.insert(data.end(), value.string(), value.string() + value.length());
-                                offsets.emplace_back(data.size());
-                                ++num_rows;
-                            }
-                        } else {
-                            if (4 + offsets.size() * 2 + data.size() + (num_rows / 8 + 1)
-                                > PAGE_SIZE) {
-                                save_page();
-                            }
-                            unset_bitmap(bitmap, num_rows);
-                            ++num_rows;
+                        if (!temp->can_store_string(value)) {
+                            pages.emplace_back(temp->dump_page());
                         }
-                    }
-                    if (num_rows != 0) {
-                        save_page();
+                        temp->add_row(value);
                     }
                     continue;
                 } else {
@@ -1027,6 +1085,12 @@ public:
                 }
             }
             found += row_num;
+        }
+        
+        for (auto &temp_page : unfilled_page_) {
+            if (!temp_page->is_empty()) {
+                page_buffers_.emplace_back(temp_page->dump_page());
+            }
         }
 
         // 申请shared_.output_的锁...
