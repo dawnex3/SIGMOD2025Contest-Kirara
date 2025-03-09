@@ -487,10 +487,12 @@ public:
 
 
             shared_.found_.fetch_add(found);   // 加到所有线程的总found上
+            profile_guard.pause();
             current_barrier->wait([&]() {   // 等待所有线程完成计算，确定哈希表大小
                 auto total_found = shared_.found_.load();
                 if (total_found) shared_.hashmap_.setSize(total_found);
             });
+            profile_guard.resume();
             auto total_found = shared_.found_.load();
             if (total_found == 0) {
                 is_build_ = true;
@@ -504,7 +506,9 @@ public:
                     reinterpret_cast<Hashmap::EntryHeader*>(ht_entrys), n, ht_entry_size_);
             }
             is_build_ = true;
+            profile_guard.pause();
             current_barrier->wait(); // 等待所有线程插入哈希表
+            profile_guard.resume();
         }
 
         // 探测阶段
@@ -944,7 +948,7 @@ public:
         std::vector<uint8_t> bitmap;
         Page *page = nullptr;
         void alloc_page() {
-#ifndef NOTDEBUG
+#ifdef PROFILER
             if (page != nullptr) {
                 throw std::runtime_error("page is not null");
             }
@@ -982,7 +986,7 @@ public:
         }
 
         void add_row(int value) {
-#ifndef NOTDEBUG
+#ifdef PROFILER
             if (is_full()) {
                 throw std::runtime_error("page is full");
             }
@@ -1036,7 +1040,7 @@ public:
         }
 
         void add_row(const varchar_ptr value) {
-#ifndef NOTDEBUG
+#ifdef PROFILER
             if (!can_store_string(value)) {
                 throw std::runtime_error("page is full");
             }

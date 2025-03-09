@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <vector>
+#include "Profiler.hpp"
 
 namespace Contest {
 
@@ -44,12 +45,14 @@ public:
             }
         } else {
             // 非最后一个到达的线程等待新轮次
+            global_profiler->event_begin("barrier wait");
             while (round_.load(std::memory_order_acquire) == my_round) {
                 // 使用 PAUSE 指令降低功耗，避免忙等待过于激烈
                 asm("pause");
                 asm("pause");
                 asm("pause");
             }
+            global_profiler->event_end("barrier wait");
             return false;
         }
     }
