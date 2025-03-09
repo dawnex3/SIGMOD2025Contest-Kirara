@@ -50,7 +50,7 @@ public:
   }
 
   void event_begin(const std::string &event_name) {
-#ifndef NOTDEBUG
+#ifdef PROFILER
     int eveid = 0;
     if ((eveid = find_event_index(event_name)) == INT32_MIN) {
       eveid = append_new_event(event_name, EventType::EVENT);
@@ -62,7 +62,7 @@ public:
   }
 
   void event_end(const std::string &event_name) {
-#ifndef NOTDEBUG
+#ifdef PROFILER
     int eveid = 0;
     if ((eveid = find_event_index(event_name)) == INT32_MIN) {
       throw std::runtime_error("event not esxists");
@@ -94,7 +94,7 @@ public:
   void event_resume(const std::string &event_name) { event_begin(event_name); }
 
   void add_input_row_count(const std::string &operator_name, int num) {
-#ifndef NOTDEBUG
+#ifdef PROFILER
     int eveid = 0;
     std::string op_name = operator_name + "(in/out)";
     if ((eveid = find_event_index(op_name)) == INT32_MIN) {
@@ -111,7 +111,7 @@ public:
   }
 
   void add_output_row_count(const std::string &operator_name, int num) {
-#ifndef NOTDEBUG
+#ifdef PROFILER
     int eveid = 0;
     std::string op_name = operator_name + "(in/out)";
     if ((eveid = find_event_index(op_name)) == INT32_MIN) {
@@ -128,7 +128,7 @@ public:
   }
 
   void print_profiles() {
-#ifndef NOTDEBUG
+#ifdef PROFILER
     fmt::print("| thid |");
     std::vector<int> algin;
     for (int i = 0; i < event_names_.size(); i++) {
