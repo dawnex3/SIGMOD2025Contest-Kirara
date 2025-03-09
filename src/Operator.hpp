@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -918,27 +919,52 @@ public:
         }
     };
 
-    struct TempPage {
+    class TempPage {
+    public:
         virtual Page *dump_page() = 0;
         virtual bool is_empty() = 0;
     };
 
-    struct TempIntPage : public TempPage {
-        uint16_t             num_rows = 0;
-        std::vector<int32_t> data;
+    class TempIntPage : public TempPage {
+    private:
         std::vector<uint8_t> bitmap;
-
+        Page *page = nullptr;
+        void alloc_page() {
+#ifndef NDEBUG
+            if (page != nullptr) {
+                throw std::runtime_error("page is not null");
+            }
+#endif
+            page = new Page;
+            memset(page->data, 0, PAGE_SIZE);
+        }
+    public:
         TempIntPage() {
-            data.reserve(2048);
             bitmap.reserve(256);
         }
 
+        uint16_t &num_rows() {
+            return *(uint16_t *)(page->data);
+        }
+
+        uint16_t &num_values() {
+            return *(uint16_t *)(page->data + 2);
+        }
+
+        int32_t *data() {
+            return (int32_t *)(page->data + 4);
+        }
+
         bool is_full() {
-            return 4 + (data.size() + 1) * 4 + (num_rows / 8 + 1) > PAGE_SIZE;
+            if (page == nullptr) {
+                return false;
+            } else {
+                return 4 + (num_values() + 1) * 4 + (num_rows() / 8 + 1) > PAGE_SIZE;
+            }
         }
 
         bool is_empty() override {
-            return num_rows == 0;
+            return page == nullptr;
         }
 
         void add_row(int value) {
@@ -947,35 +973,36 @@ public:
                 throw std::runtime_error("page is full");
             }
 #endif
-            if (value != NULL_INT32) {
-                set_bitmap(bitmap, num_rows);
-                data.emplace_back(value);
-                ++num_rows;
-            } else {
-                unset_bitmap(bitmap, num_rows);
-                ++num_rows;
+            if (is_empty()) {
+                alloc_page();
             }
+            if (value != NULL_INT32) {
+                set_bitmap(bitmap, num_rows());
+                data()[num_values()] = value;
+                num_values() ++;
+            } else {
+                unset_bitmap(bitmap, num_rows());
+            }
+            num_rows() ++;
         }
 
         Page *dump_page() override {
-            auto* page                             = new Page;
-            *reinterpret_cast<uint16_t*>(page->data)     = num_rows;
-            *reinterpret_cast<uint16_t*>(page->data + 2) = static_cast<uint16_t>(data.size());
-            memcpy(page->data + 4, data.data(), data.size() * 4);
+            Page *result_page = page; 
             memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
-            num_rows = 0;
-            data.clear();
             bitmap.clear();
-            return page;
+            page = nullptr;
+            return result_page;
         }
     };
 
-    struct TempStringPage : public TempPage {
+    class TempStringPage : public TempPage {
+    private:
         uint16_t              num_rows = 0;
         std::vector<char>     data;
         std::vector<uint16_t> offsets;
         std::vector<uint8_t>  bitmap;
 
+    public:
         TempStringPage() {
             data.reserve(8192);
             offsets.reserve(4096);
@@ -1025,6 +1052,7 @@ public:
             data.clear();
             offsets.clear();
             bitmap.clear();
+            return page;
         }
 
     };
@@ -1095,9 +1123,10 @@ public:
             found += row_num;
         }
         
-        for (auto &temp_page : unfilled_page_) {
-            if (!temp_page->is_empty()) {
-                page_buffers_.emplace_back(temp_page->dump_page());
+        for (int i = 0; i < shared_.output_.columns.size(); ++i) {
+            auto temp = unfilled_page_[i].get();
+            if (!temp->is_empty()) {
+                page_buffers_[i].emplace_back(temp->dump_page());
             }
         }
 
