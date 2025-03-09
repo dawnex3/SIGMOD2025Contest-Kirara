@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <sys/types.h>
 #include <vector>
+#include <iostream>
 #include "SharedState.hpp"
 #include "attribute.h"
 #include "statement.h"
@@ -32,13 +33,13 @@ struct varchar_ptr {
     inline void set(const char *str, uint16_t length) {
         ptr = ((uint64_t)length << 48) | (uint64_t)(str);
     }
-    inline const char *string() {
+    inline const char *string() const{
         return (const char *)(ptr & 0x0000FFFFFFFFFFFF);
     }
-    inline uint16_t length() {
+    inline uint16_t length() const{
         return (uint16_t)(ptr >> 48);
     }
-    inline bool is_null() {
+    inline bool is_null() const{
         return ptr == NULL_VARCHAR;
     }
 };
@@ -89,10 +90,55 @@ public:
     // 存储所有列的变体集合
     std::vector<ColumnVariant> columns_;
 
-    inline bool isEmpty(){
+    inline bool isEmpty() const{
         return num_rows_==0;
     };
+
+    // 打印出该表。目前只支持列全部为InstantiatedColumn的情况
+    void print() const {
+        std::cout << toString(); // 直接输出 toString 的结果
+    }
+
+    std::string toString(bool head=true) const {
+        std::ostringstream oss;
+
+        // 添加表头信息
+        if(head){
+            oss << "table size: " << num_rows_ << " rows * " << columns_.size() << " cols\n";
+        }
+
+        // 构建列信息
+        std::vector<std::variant<const int32_t*, const varchar_ptr*>> cols;
+        for (const ColumnVariant& column_variant : columns_) {
+            auto col = std::get<InstantiatedColumn>(column_variant);
+            if (col.first == DataType::INT32) {
+                cols.emplace_back(reinterpret_cast<const int32_t*>(col.second));
+            } else if (col.first == DataType::VARCHAR) {
+                cols.emplace_back(reinterpret_cast<const varchar_ptr*>(col.second));
+            } else {
+                throw std::runtime_error("Unsupported data type");
+            }
+        }
+
+        // 构建行信息
+        for (size_t i = 0; i < num_rows_; i++) {
+            for (auto col_ptr : cols) {
+                std::visit([&](auto&& ptr) {
+                    using T = std::decay_t<decltype(ptr)>;
+                    if constexpr (std::is_same_v<T, const int32_t*>) {
+                        oss << ptr[i] << "\t\t"; // INT32 类型的值
+                    } else {
+                        oss << std::string(ptr[i].string(), ptr[i].length()) << "\t\t"; // VARCHAR 类型的值
+                    }
+                }, col_ptr);
+            }
+            oss << "\n"; // 换行
+        }
+
+        return oss.str(); // 返回构建的字符串
+    }
 };
+
 
 // 一些辅助读取Column信息的函数
 // 获取页面的总行数（含NULL值）
@@ -317,6 +363,7 @@ private:
 
 #ifdef DEBUG_LOG
     size_t total_output{0};
+    std::string table_str;
 #endif
 
 public:
@@ -449,7 +496,8 @@ public:
                     last_result_.num_rows_ = 0;
 #ifdef DEBUG_LOG
                     // 打印该节点输出的总行数
-                    printf("join output rows:%d\n",total_output);
+                    printf("join output rows: %ld, details:\n",total_output);
+                    std::cout<<table_str<<std::endl;
 #endif
                     return last_result_;
                 }
@@ -463,9 +511,6 @@ public:
             n = checkKeyEquality(n);
             if (n == 0) continue;
             // 物化最终结果。将匹配的(Entry*, pos)中，左侧的值收集起来，右侧对应的行的值也收集起来
-#ifdef DEBUG_LOG
-            total_output += n;
-#endif
             last_result_.num_rows_ = n;
             size_t curr_out_col = 0;
             for(size_t col_idx:output_attrs_){
@@ -479,6 +524,10 @@ public:
                         (uint8_t*)column.second,column.first==DataType::INT32 ? 4:8,probe_matches_);
                 }
             }
+#ifdef DEBUG_LOG
+            total_output += n;
+            table_str.append(last_result_.toString(false));
+#endif
             return last_result_;
         }
     }
@@ -983,6 +1032,7 @@ public:
         // 申请shared_.output_的锁...
         {
             std::lock_guard lock(shared_.m_);
+            shared_.output_.num_rows += found;
             for(size_t i=0; i<shared_.output_.columns.size(); i++){
                 auto& column = shared_.output_.columns[i];
                 column.pages.insert(column.pages.end(),
