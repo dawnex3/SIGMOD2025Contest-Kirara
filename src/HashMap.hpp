@@ -197,6 +197,7 @@ size_t inline Hashmap::setSize(size_t nrEntries) {
     mask = capacity - 1;
     //entries = static_cast<std::atomic<EntryHeader*>*>(mem::malloc_huge(capacity * sizeof(std::atomic<EntryHeader*>)));
     entries = static_cast<std::atomic<EntryHeader*>*>(malloc(capacity * sizeof(std::atomic<EntryHeader*>)));
+    memset((void *)entries,0,capacity * sizeof(std::atomic<EntryHeader*>));
     return capacity * loadFactor;
 }
 

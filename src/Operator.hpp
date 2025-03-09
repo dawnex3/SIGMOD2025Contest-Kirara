@@ -14,6 +14,7 @@
 #include "Barrier.hpp"
 
 namespace Contest {
+#define DEBUG_LOG
 
 #define FULL_INT32_PAGE 1984
 
@@ -133,7 +134,7 @@ inline const uint16_t* getVarcharOffset(const Page* page) {
 }
 
 // 位图中idx号元素是否为NULL
-inline bool isNull(const uint8_t* bitmap, uint16_t idx) {
+inline bool isNotNull(const uint8_t* bitmap, uint16_t idx) {
     auto byte_idx = idx / 8;
     auto bit      = idx % 8;
     return bitmap[byte_idx] & (1u << bit);
@@ -314,6 +315,10 @@ private:
     uint32_t *queue_probe_;                 // 探测侧的循环队列，存储行号
     Hashmap::EntryHeader** queue_build_;    // 构建侧的循环队列，指向Entry
 
+#ifdef DEBUG_LOG
+    size_t total_output{0};
+#endif
+
 public:
 
     Hashjoin(Shared& shared, size_t vec_size, std::unique_ptr<Operator> left, size_t left_idx,
@@ -332,7 +337,7 @@ public:
             }
         }
 
-        ht_entry_size_ = (sizeof(Hashmap::EntryHeader) + 7) & ~7;   // 将ht_entry_size_补齐到8倍数
+        ht_entry_size_ = (ht_entry_size_ + 7) & ~7;   // 将ht_entry_size_补齐到8倍数
         for(uint32_t i=0; i<left_attrs.size(); i++){
             if(std::get<1>(left_attrs[i])!=DataType::INT32){
                 build_value_offsets_[i]=ht_entry_size_;
@@ -401,7 +406,7 @@ public:
 
                 // 从数据源OperatorResultTable取出键值，计算键的哈希值并存储到EntryHeader当中。键本身也要存储到EntryHeader。
                 OperatorResultTable::ColumnVariant  left_key = left_table.columns_[left_idx_];
-                calculateColHash<true>(left_key, n, ht_entrys, ht_entry_size_,
+                calculateColHash<true>(left_key, n, ht_entrys+offsetof(Hashmap::EntryHeader, hash), ht_entry_size_,
                     ht_entrys+build_value_offsets_[left_idx_],ht_entry_size_);
 
                 // 将构建侧的其他列存储到EntryHeader后面。
@@ -442,10 +447,14 @@ public:
                 cont_.num_probe_ = right_result_.num_rows_;
                 if (cont_.num_probe_ == 0) {
                     last_result_.num_rows_ = 0;
+#ifdef DEBUG_LOG
+                    // 打印该节点输出的总行数
+                    printf("join output rows:%d\n",total_output);
+#endif
                     return last_result_;
                 }
                 // 计算right_result_中键的哈希值，存储到probe_hashes_数组中
-                calculateColHash<false>(right_result_.columns_[left_idx_],right_result_.num_rows_,
+                calculateColHash<false>(right_result_.columns_[right_idx_],right_result_.num_rows_,
                     (uint8_t *)probe_hashes_,sizeof(Hashmap::hash_t));
             }
             // 调用探测函数，检测哈希值相等的(Entry*, pos)对，分别存储在build_matches_和probe_matches_中
@@ -454,9 +463,15 @@ public:
             n = checkKeyEquality(n);
             if (n == 0) continue;
             // 物化最终结果。将匹配的(Entry*, pos)中，左侧的值收集起来，右侧对应的行的值也收集起来
+#ifdef DEBUG_LOG
+            total_output += n;
+#endif
+            last_result_.num_rows_ = n;
+            size_t curr_out_col = 0;
             for(size_t col_idx:output_attrs_){
                 size_t left_column_num = left_->resultColumnNum();
-                auto column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[col_idx]);
+                auto column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[curr_out_col]);
+                curr_out_col++;
                 if(col_idx < left_column_num){      //如果是构建表
                     gatherEntry(column,n,build_value_offsets_[col_idx]);
                 } else {                            // 如果是探测表
@@ -479,7 +494,7 @@ public:
                 assert(arg.first==DataType::INT32);
                 const int32_t* base = (int32_t*)arg.second;
                 for (size_t i = 0; i < n; ++i) {
-                    ((Hashmap::EntryHeader*)hash_target)->hash = hash_32(base[i]);
+                    *(Hashmap::hash_t *)hash_target=hash_32(base[i]);
                     hash_target += hast_step;
                     if constexpr (RestoreColumn){
                         *(int32_t*)(col_target) = base[i];
@@ -495,7 +510,7 @@ public:
                 const int32_t* base = getPageData<int32_t>(*current_page) + std::get<2>(arg);
                 do{
                     for (size_t i = 0; i < row_num_this_page; ++i) {
-                        ((Hashmap::EntryHeader*)hash_target)->hash = hash_32(base[i]);
+                        *(Hashmap::hash_t *)hash_target=hash_32(base[i]);
                         hash_target += hast_step;
                         if constexpr (RestoreColumn){
                             *(int32_t*)(col_target) = base[i];
@@ -504,7 +519,7 @@ public:
                     }
                     n -= row_num_this_page;
                     current_page++;
-                    base = getPageData<int32_t>(*current_page);
+                    if(n) base = getPageData<int32_t>(*current_page);
                     row_num_this_page = std::min((size_t)FULL_INT32_PAGE, n);
                 }while (n>0);
             }
@@ -551,10 +566,10 @@ public:
                     const int32_t* base = getPageData<int32_t>(*current_page) + getNonNullCount(bitmap, start_row);
                     do{
                         for (size_t i=start_row; i < num_rows+start_row; i++) {
-                            if (isNull(bitmap, i)) {
-                                *(int32_t*)(col_target) = NULL_INT32;
-                            } else {
+                            if (isNotNull(bitmap, i)) {
                                 *(int32_t*)(col_target) = *(base++);
+                            } else {
+                                *(int32_t*)(col_target) = NULL_INT32;
                             }
                             col_target += col_step;
                         }
@@ -573,12 +588,12 @@ public:
                     do{
                         const char* base = getPageData<char>(*current_page);
                         for (size_t i=start_row; i < num_rows+start_row; i++) {
-                            if (isNull(bitmap, i)) {
-                                *(uint64_t *)(col_target) = NULL_VARCHAR;
-                            } else {
+                            if (isNotNull(bitmap, i)) {
                                 *(uint64_t *)(col_target) = ((uint64_t)(*str_end - str_begin)<<48) | (uint64_t)(base + str_begin);
                                 str_begin = *str_end;
                                 str_end ++;
+                            } else {
+                                *(uint64_t *)(col_target) = NULL_VARCHAR;
                             }
                             col_target += col_step;
                         }
@@ -600,17 +615,17 @@ public:
                     for(uint32_t i=0; i<n; i++){
                         // 定位到probe_matches_[i]所在的Page，和页内偏移
                         while(offset >= getRowCount(*current_page)){
-                            current_page++;
                             offset -= getRowCount(*current_page);
+                            current_page++;
                             bitmap = getBitmap(*current_page);
                         }
 
                         // 取出数据
-                        if(isNull(bitmap, offset)){
-                            *(int32_t*)(col_target) = NULL_INT32;
-                        } else {
+                        if(isNotNull(bitmap, offset)){
                             const int32_t* data_ptr = getPageData<int32_t>(*current_page) + getNonNullCount(bitmap, offset);
                             *(int32_t*)(col_target) = *data_ptr;
+                        } else {
+                            *(int32_t*)(col_target) = NULL_INT32;
                         }
 
                         col_target += col_step;
@@ -620,21 +635,20 @@ public:
                     for(uint32_t i=0; i<n; i++){
                         // 定位到probe_matches_[i]所在的Page，和页内偏移
                         while(offset > getRowCount(*current_page)){
-                            current_page++;
                             offset -= getRowCount(*current_page);
+                            current_page++;
                             bitmap = getBitmap(*current_page);
                         }
 
                         // 取出数据
-                        if(isNull(bitmap, offset)){
-                            *(uint64_t*)(col_target) = NULL_VARCHAR;
-                        } else {
+                        if(isNotNull(bitmap, offset)){
                             // 获取varchar的起始和终止位置
                             size_t non_null = getNonNullCount(bitmap,offset);
                             const uint16_t* str_end = getVarcharOffset(*current_page) + non_null;
                             uint16_t str_begin = non_null==0 ? 0 : *(str_end-1);
-
                             *(uint64_t *)(col_target) = ((uint64_t)(*str_end - str_begin)<<48) | (uint64_t)(getPageData<char>(*current_page) + str_begin);
+                        } else {
+                            *(uint64_t*)(col_target) = NULL_VARCHAR;
                         }
 
                         col_target += col_step;
