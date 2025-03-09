@@ -1,13 +1,19 @@
+#include <algorithm>
+#include <chrono>
 #include <plan.h>
 #include <table.h>
 #include <thread>
+#include "Profiler.hpp"
 #include "SharedState.hpp"
 #include "Operator.hpp"
 #include "Barrier.hpp"
 
 namespace Contest {
 
+Profiler *global_profiler = nullptr;
+
 using ExecuteResult = std::vector<std::vector<Data>>;
+using namespace std::chrono;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
@@ -244,41 +250,57 @@ std::unique_ptr<ResultWriter> getPlan(const Plan& plan, SharedStateManager& shar
     return std::move(result_writer);
 }
 
-
-
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-    const int thread_num = 4;                           // 线程数（包括主线程）
+    const int thread_num = 64;                           // 线程数（包括主线程）
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
     std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
     SharedStateManager shared_manager;                  // 创建共享状态
     ColumnarTable result;                               // 执行结果
+    global_profiler = new Profiler(thread_num);
 
     // 启动所有线程
-    int barrier_group = -1;
-    for (int i = 0; i < thread_num - 1; ++i) {
-        if (i % Barrier::threads_per_barrier_ == 0) barrier_group++;    // 每threads_per_barrier_个线程属于一个barrier_group
+    for (int i = 0; i < thread_num; ++i) {
+        int barrier_group = i / Barrier::threads_per_barrier_;    // 每threads_per_barrier_个线程属于一个barrier_group
 
-        threads.emplace_back([&plan, &shared_manager, &result, &barriers, &barrier_group]() {
-            // 确定当前线程的Barrier
-            current_barrier = barriers[barrier_group];
-            // 每个线程生成各自的执行计划
-            std::unique_ptr<ResultWriter> result_writer = getPlan(plan,shared_manager,vector_size);
-            // 执行计划
-            result_writer->next();
-            // 等待所有线程完成
-            bool is_last = current_barrier->wait();
-            // 由最后一个线程转移结果
-            if (is_last) result = std::move(result_writer->shared_.output_);
-        });
+        if (i == thread_num - 1) {
+            [&plan, &shared_manager, &result, &barriers, barrier_group, i]() {
+                global_profiler->set_thread_id(i);
+                global_profiler->event_start("execute");
+                auto start = high_resolution_clock::now();
+                // 确定当前线程的Barrier
+                current_barrier = barriers[barrier_group];
+                // 每个线程生成各自的执行计划
+                std::unique_ptr<ResultWriter> result_writer = getPlan(plan,shared_manager,vector_size);
+                // 执行计划
+                result_writer->next();
+                // 等待所有线程完成
+                bool is_last = current_barrier->wait();
+                // 由最后一个线程转移结果
+                if (is_last) result = std::move(result_writer->shared_.output_);
+                auto end = high_resolution_clock::now();
+                global_profiler->event_end("execute");
+            }();
+        } else {
+            threads.emplace_back(        [&plan, &shared_manager, &result, &barriers, barrier_group, i]() {
+                global_profiler->set_thread_id(i);
+                global_profiler->event_start("execute");
+                auto start = high_resolution_clock::now();
+                // 确定当前线程的Barrier
+                current_barrier = barriers[barrier_group];
+                // 每个线程生成各自的执行计划
+                std::unique_ptr<ResultWriter> result_writer = getPlan(plan,shared_manager,vector_size);
+                // 执行计划
+                result_writer->next();
+                // 等待所有线程完成
+                bool is_last = current_barrier->wait();
+                // 由最后一个线程转移结果
+                if (is_last) result = std::move(result_writer->shared_.output_);
+                auto end = high_resolution_clock::now();
+                global_profiler->event_end("execute");
+            });
+        }   
     }
-
-    // 主线程也启动任务，别闲着
-    current_barrier = barriers.back();
-    std::unique_ptr<ResultWriter> result_writer = getPlan(plan,shared_manager,vector_size);
-    result_writer->next();
-    bool is_last = current_barrier->wait();
-    if (is_last) result = std::move(result_writer->shared_.output_);
 
     // 等待所有线程结束
     for (auto& t : threads) {
@@ -289,6 +311,10 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 
     // 销毁屏障
     Barrier::destroy(barriers);
+
+    global_profiler->print_profiles();
+    delete global_profiler;
+    global_profiler = nullptr;
 
     return result;
 }

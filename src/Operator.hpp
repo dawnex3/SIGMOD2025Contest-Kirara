@@ -1130,7 +1130,6 @@ public:
             }
         }
 
-        // 申请shared_.output_的锁...
         {
             std::lock_guard lock(shared_.m_);
             shared_.output_.num_rows += found;

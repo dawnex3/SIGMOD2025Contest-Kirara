@@ -75,7 +75,7 @@ public:
         std::vector<Barrier *> parent_barriers = create(total_barriers);
         // 再创建当前层屏障
         for (size_t i = 0; i < full_barrier_num; ++i) {
-            result.push_back(new Barrier(threads_per_barrier_, parent_barriers[i]));
+            result.push_back(new Barrier(threads_per_barrier_, parent_barriers[i / threads_per_barrier_]));
         }
         if (threads_in_rest > 0)
             result.push_back(new Barrier(threads_in_rest, parent_barriers.back()));
