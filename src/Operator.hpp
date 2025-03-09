@@ -18,7 +18,7 @@
 #include "Barrier.hpp"
 
 namespace Contest {
-#define DEBUG_LOG
+//#define DEBUG_LOG
 
 #define FULL_INT32_PAGE 1984
 
@@ -406,7 +406,7 @@ public:
         // 分配缓冲区的内存
         probe_hashes_ = (Hashmap::hash_t*)malloc(vec_size_*sizeof(Hashmap::hash_t));
         build_matches_ = (Hashmap::EntryHeader**)malloc(vec_size_*sizeof(Hashmap::EntryHeader*));
-        probe_matches_ = (uint32_t*)malloc(vec_size_*sizeof(uint32_t));
+        probe_matches_ = (uint32_t*)malloc((vec_size_+1)*sizeof(uint32_t));
 
         // 分配结果表last_result_的内存，设置output_attrs_
         for(auto [col_idx, col_type]:output_attrs){
@@ -588,7 +588,7 @@ public:
 
 
     // 收集一列的值，并存储到指定位置。
-    template <bool SpecifiedIndex>   //可选：指定行的下标数组。下标数组必须递增
+    template <bool SpecifiedIndex>   //可选：指定行的下标数组。下标数组必须递增。下标数组大小必须大于等于n+1
     void gatherCol(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* col_target, size_t col_step, const uint32_t* idx=nullptr){
         std::visit([&](auto&& arg) {
             using T = std::decay_t<decltype(arg)>;
