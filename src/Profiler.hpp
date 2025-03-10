@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 
@@ -40,6 +41,10 @@ public:
   Profiler(int thread_num) {
     thread_num_ = thread_num;
     events_.resize(thread_num);
+    for (auto &ev : events_) {
+      ev.reserve(128);
+      event_names_.reserve(128);
+    }
   }
 
   void set_thread_id(int thread_id) {
@@ -52,10 +57,12 @@ public:
   void event_begin(const std::string &event_name) {
 #ifdef PROFILER
     int eveid = 0;
-    if ((eveid = find_event_index(event_name)) == INT32_MIN) {
-      eveid = append_new_event(event_name, EventType::EVENT);
-    }
     std::shared_lock lock(rw_mtx_);
+    if ((eveid = find_event_index(event_name)) == INT32_MIN) {
+      lock.unlock();
+      eveid = append_new_event(event_name, EventType::EVENT);
+      lock.lock();
+    }
     events_[get_current_id()][eveid].begin_time = get_current_time();
     events_[get_current_id()][eveid].begin_cputime = get_current_cpu_time();
 #endif
@@ -64,10 +71,10 @@ public:
   void event_end(const std::string &event_name) {
 #ifdef PROFILER
     int eveid = 0;
+    std::shared_lock lock(rw_mtx_);
     if ((eveid = find_event_index(event_name)) == INT32_MIN) {
       throw std::runtime_error("event not esxists");
     }
-    std::shared_lock lock(rw_mtx_);
 
     Event &current = events_[get_current_id()][eveid];
     if (current.begin_time == INT64_MIN || current.begin_cputime == INT64_MIN) {
@@ -96,11 +103,13 @@ public:
   void add_input_row_count(const std::string &operator_name, int num) {
 #ifdef PROFILER
     int eveid = 0;
+    std::shared_lock lock(rw_mtx_);
     std::string op_name = operator_name + "(in/out)";
     if ((eveid = find_event_index(op_name)) == INT32_MIN) {
+      lock.unlock();
       eveid = append_new_event(op_name, EventType::OPERATOR);
+      lock.lock();
     }
-    std::shared_lock lock(rw_mtx_);
 
     Event &current = events_[get_current_id()][eveid];
     if (current.type != EventType::OPERATOR) {
@@ -113,11 +122,13 @@ public:
   void add_output_row_count(const std::string &operator_name, int num) {
 #ifdef PROFILER
     int eveid = 0;
+    std::shared_lock lock(rw_mtx_);
     std::string op_name = operator_name + "(in/out)";
     if ((eveid = find_event_index(op_name)) == INT32_MIN) {
+      lock.unlock();
       eveid = append_new_event(op_name, EventType::OPERATOR);
+      lock.lock();
     }
-    std::shared_lock lock(rw_mtx_);
 
     Event &current = events_[get_current_id()][eveid];
     if (current.type != EventType::OPERATOR) {
@@ -129,17 +140,30 @@ public:
 
   void print_profiles() {
 #ifdef PROFILER
+    std::unique_lock lock(rw_mtx_);
     fmt::print("| thid |");
     std::vector<int> algin;
+    std::vector<std::pair<const char *, int>> sorted_event;
+
     for (int i = 0; i < event_names_.size(); i++) {
-      algin.push_back(std::max(event_names_[i].size(), (size_t)6));
-      fmt::print(" {:<{}} |", event_names_[i], algin[i]);
+      sorted_event.push_back({event_names_[i].c_str(), i});
+    }
+
+    std::sort(sorted_event.begin(), sorted_event.end(),
+              [](const std::pair<const char *, int> &a,
+                 const std::pair<const char *, int> &b) {
+                return strcmp(a.first, b.first) < 0;
+              });
+
+    for (int i = 0; i < sorted_event.size(); i++) {
+      algin.push_back(std::max(strlen(sorted_event[i].first), (size_t)6));
+      fmt::print(" {:<{}} |", sorted_event[i].first, algin[i]);
     }
     fmt::println("");
     for (int i = 0; i < thread_num_; i++) {
       fmt::print("| {:4} |", i);
-      for (int j = 0; j < event_names_.size(); j++) {
-        Event &event = events_[i][j];
+      for (int j = 0; j < sorted_event.size(); j++) {
+        Event &event = events_[i][sorted_event[j].second];
         if (event.type == EventType::EVENT) {
           fmt::print(" {:<{}} |", even_time_to_string(event), algin[j]);
         } else if (event.type == EventType::OPERATOR) {
@@ -186,17 +210,17 @@ private:
     }
 
     event_names_.push_back(event_name);
-    event_indices_.insert({event_name, event_names_.size() - 1});
+    event_indices_.insert({event_name, event_indices_.size()});
     for (int i = 0; i < events_.size(); i++) {
       auto &events = events_[i];
       events.emplace_back();
       Event &current = events.back();
-      current.name = event_name.c_str();
+      current.name = event_names_.back().c_str();
       current.thread_id = i;
       current.type = type;
     }
 
-    return event_names_.size() - 1;
+    return event_indices_.size() - 1;
   }
 
   int64_t get_current_cpu_time() {
@@ -219,8 +243,8 @@ private:
 
 private:
   thread_local static int this_thread_id;
-  std::unordered_map<std::string, int> event_indices_;
   std::vector<std::string> event_names_;
+  std::unordered_map<std::string, int> event_indices_;
   std::vector<std::vector<Event>> events_;
   std::shared_mutex rw_mtx_;
   int thread_num_;

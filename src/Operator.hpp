@@ -21,7 +21,7 @@
 #include "DataStructure.hpp"
 
 namespace Contest {
-#define DEBUG_LOG
+// #define DEBUG_LOG
 
 class Operator {
 public:
@@ -79,7 +79,7 @@ public:
 
     OperatorResultTable next() override{
         size_t skip_rows;       // 本次调用，相比于上次跳过的行数
-        //ProfileGuard profile_guard(global_profiler, "Scan_" + std::to_string(shared_.get_operator_id()));
+        ProfileGuard profile_guard(global_profiler, "Scan_" + std::to_string(shared_.get_operator_id()));
 
         if (vec_in_chunk_ == chunk_size_) {     // 如果本块已经处理完，取出新的一块，更新全局状态
             size_t current_chunk = shared_.pos_.fetch_add(1); // 取出shared_.pos_的旧值表示当前要处理的块，并加上1
@@ -122,8 +122,8 @@ public:
                 }
             }
             vec_in_chunk_ ++;
-            //profile_guard.add_input_row_count(last_result_.num_rows_);
-            //profile_guard.add_output_row_count(last_result_.num_rows_);
+            profile_guard.add_input_row_count(last_result_.num_rows_);
+            profile_guard.add_output_row_count(last_result_.num_rows_);
 
             return last_result_;
         }
@@ -263,15 +263,16 @@ public:
     }
 
     OperatorResultTable next() override{
-        //ProfileGuard profile_guard(global_profiler, "HashJoin_" + std::to_string(shared_.get_operator_id()));
+        ProfileGuard profile_guard(global_profiler, "HashJoin_" + std::to_string(shared_.get_operator_id()));
 
         if (!is_build_) {     // 构建哈希表
             size_t found = 0;
             while (true){
-                //profile_guard.pause();
+                profile_guard.pause();
                 OperatorResultTable left_table = left_->next(); // 调用左算子
-                //profile_guard.resume();
-                //profile_guard.add_input_row_count( left_table.num_rows_);                profile_guard.add_input_row_count( left_table.num_rows_);
+                profile_guard.resume();
+                profile_guard.add_input_row_count( left_table.num_rows_);
+                profile_guard.add_output_row_count( left_table.num_rows_);
                 size_t n = left_table.num_rows_;
                 if(n==0) break;
                 found += n;
@@ -295,12 +296,12 @@ public:
 
 
             shared_.found_.fetch_add(found);   // 加到所有线程的总found上
-            //profile_guard.pause();
+            profile_guard.pause();
             current_barrier->wait([&]() {   // 等待所有线程完成计算，确定哈希表大小
                 auto total_found = shared_.found_.load();
                 if (total_found) shared_.hashmap_.setSize(total_found);
             });
-            //profile_guard.resume();
+            profile_guard.resume();
             auto total_found = shared_.found_.load();
             if (total_found == 0) {
                 is_build_ = true;
@@ -314,18 +315,18 @@ public:
                     reinterpret_cast<Hashmap::EntryHeader*>(ht_entrys), n, ht_entry_size_);
             }
             is_build_ = true;
-            //profile_guard.pause();
+            profile_guard.pause();
             current_barrier->wait(); // 等待所有线程插入哈希表
-            //profile_guard.resume();
+            profile_guard.resume();
         }
 
         // 探测阶段
         while (true) {
             if (cont_.next_probe_ >= cont_.num_probe_) {
-                //profile_guard.pause();
+                profile_guard.pause();
                 right_result_ = right_->next();     // 调用右侧算子，结果保存到right_result_
-                //profile_guard.resume();
-                //profile_guard.add_input_row_count(right_result_.num_rows_);
+                profile_guard.resume();
+                profile_guard.add_input_row_count(right_result_.num_rows_);
                 cont_.next_probe_ = 0;
                 cont_.num_probe_ = right_result_.num_rows_;
                 if (cont_.num_probe_ == 0) {
@@ -364,7 +365,7 @@ public:
                         (uint8_t*)column.second,column.first==DataType::INT32 ? 4:8,probe_matches_);
                 }
             }
-            //profile_guard.add_output_row_count(n);
+            profile_guard.add_output_row_count(n);
 #ifdef DEBUG_LOG
             total_output += n;
             table_str.append(last_result_.toString(false));
@@ -656,147 +657,6 @@ public:
         }
     };
 
-    class TempPage {
-    public:
-        virtual Page *dump_page() = 0;
-        virtual bool is_empty() = 0;
-        virtual ~TempPage() = default;
-    };
-
-    class TempIntPage : public TempPage {
-    private:
-        std::vector<uint8_t> bitmap;
-        Page *page = nullptr;
-        void alloc_page() {
-#ifdef PROFILER
-            if (page != nullptr) {
-                throw std::runtime_error("page is not null");
-            }
-#endif
-            page = new Page;
-            memset(page->data, 0, PAGE_SIZE);
-        }
-    public:
-        TempIntPage() {
-            bitmap.reserve(256);
-        }
-
-        uint16_t &num_rows() {
-            return *(uint16_t *)(page->data);
-        }
-
-        uint16_t &num_values() {
-            return *(uint16_t *)(page->data + 2);
-        }
-
-        int32_t *data() {
-            return (int32_t *)(page->data + 4);
-        }
-
-        bool is_full() {
-            if (page == nullptr) {
-                return false;
-            } else {
-                return 4 + (num_values() + 1) * 4 + (num_rows() / 8 + 1) > PAGE_SIZE;
-            }
-        }
-
-        bool is_empty() override {
-            return page == nullptr;
-        }
-
-        void add_row(int value) {
-#ifdef PROFILER
-            if (is_full()) {
-                throw std::runtime_error("page is full");
-            }
-#endif
-            if (is_empty()) {
-                alloc_page();
-            }
-            if (value != NULL_INT32) {
-                set_bitmap(bitmap, num_rows());
-                data()[num_values()] = value;
-                num_values() ++;
-            } else {
-                unset_bitmap(bitmap, num_rows());
-            }
-            num_rows() ++;
-        }
-
-        Page *dump_page() override {
-            Page *result_page = page;
-            memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
-            bitmap.clear();
-            page = nullptr;
-            return result_page;
-        }
-    };
-
-    class TempStringPage : public TempPage {
-    private:
-        uint16_t              num_rows = 0;
-        std::vector<char>     data;
-        std::vector<uint16_t> offsets;
-        std::vector<uint8_t>  bitmap;
-
-    public:
-        TempStringPage() {
-            data.reserve(8192);
-            offsets.reserve(4096);
-            bitmap.reserve(512);
-        }
-
-        bool is_empty() override {
-            return num_rows == 0;
-        }
-
-        bool can_store_string(const varchar_ptr value) {
-            if(value.isLongString()){
-                return num_rows==0;
-            } else if (value.isNull()) {
-                return 4 + offsets.size() * 2 + data.size() + (num_rows / 8 + 1) <= PAGE_SIZE;
-            } else {
-                return 4 + (offsets.size() + 1) * 2 + (data.size() + value.length()) + (num_rows / 8 + 1) <= PAGE_SIZE;
-            }
-        }
-
-        void add_row(const varchar_ptr value) {
-#ifdef PROFILER
-            if (!can_store_string(value)) {
-                throw std::runtime_error("page is full");
-            }
-            if (value.length() > PAGE_SIZE - 7) {
-                throw std::runtime_error("long string is not support");
-            }
-#endif
-            if (value.isNull()) {
-                unset_bitmap(bitmap, num_rows);
-                ++num_rows;
-            } else {
-                set_bitmap(bitmap, num_rows);
-                data.insert(data.end(), value.string(), value.string() + value.length());
-                offsets.emplace_back(data.size());
-                ++num_rows;
-            }
-        }
-
-        Page *dump_page() override {
-            auto* page                             = new Page;
-            *reinterpret_cast<uint16_t*>(page->data)     = num_rows;
-            *reinterpret_cast<uint16_t*>(page->data + 2) = static_cast<uint16_t>(offsets.size());
-            memcpy(page->data + 4, offsets.data(), offsets.size() * 2);
-            memcpy(page->data + 4 + offsets.size() * 2, data.data(), data.size());
-            memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
-            num_rows = 0;
-            data.clear();
-            offsets.clear();
-            bitmap.clear();
-            return page;
-        }
-
-    };
-
     Shared& shared_;
 
     std::unique_ptr<Operator> child_;   // 子算子。一般来说是个JOIN
@@ -824,9 +684,9 @@ public:
         while(true){
             OperatorResultTable child_result = child_->next();
             size_t row_num = child_result.num_rows_;
-            //ProfileGuard profile(global_profiler, "resultwriter");
-            //global_profiler->add_input_row_count("resultwriter", row_num);            global_profiler->add_input_row_count("resultwriter", row_num);
-            //global_profiler->add_output_row_count("resultwriter", row_num);            global_profiler->add_output_row_count("resultwriter", row_num);
+            ProfileGuard profile(global_profiler, "resultwriter");
+            global_profiler->add_input_row_count("resultwriter", row_num);
+            global_profiler->add_output_row_count("resultwriter", row_num);
             if(row_num==0) break;
 
             // 将每一列写入page_buffers_

@@ -47,6 +47,168 @@ struct varchar_ptr {
     inline uint16_t longStringPageNum() const { return (uint16_t)(ptr_ >> 48) & 0x7FFF; }
 };
 
+// 一些辅助处理Page信息的函数
+
+void set_bitmap(std::vector<uint8_t>& bitmap, uint16_t idx) {
+    while (bitmap.size() < idx / 8 + 1) {
+        bitmap.emplace_back(0);
+    }
+    auto byte_idx     = idx / 8;
+    auto bit          = idx % 8;
+    bitmap[byte_idx] |= (1u << bit);
+}
+
+void unset_bitmap(std::vector<uint8_t>& bitmap, uint16_t idx) {
+    while (bitmap.size() < idx / 8 + 1) {
+        bitmap.emplace_back(0);
+    }
+    auto byte_idx     = idx / 8;
+    auto bit          = idx % 8;
+    bitmap[byte_idx] &= ~(1u << bit);
+}
+
+class TempPage {
+public:
+    virtual Page *dump_page() = 0;
+    virtual bool is_empty() = 0;
+    virtual ~TempPage() = default;
+};
+
+class TempIntPage : public TempPage {
+private:
+    std::vector<uint8_t> bitmap;
+    Page *page = nullptr;
+    void alloc_page() {
+#ifdef PROFILER
+        if (page != nullptr) {
+            throw std::runtime_error("page is not null");
+        }
+#endif
+        page = new Page;
+        memset(page->data, 0, PAGE_SIZE);
+    }
+public:
+    TempIntPage() {
+        bitmap.reserve(256);
+    }
+
+    uint16_t &num_rows() {
+        return *(uint16_t *)(page->data);
+    }
+
+    uint16_t &num_values() {
+        return *(uint16_t *)(page->data + 2);
+    }
+
+    int32_t *data() {
+        return (int32_t *)(page->data + 4);
+    }
+
+    bool is_full() {
+        if (page == nullptr) {
+            return false;
+        } else {
+            return 4 + (num_values() + 1) * 4 + (num_rows() / 8 + 1) > PAGE_SIZE;
+        }
+    }
+
+    bool is_empty() override {
+        return page == nullptr;
+    }
+
+    void add_row(int value) {
+#ifdef PROFILER
+        if (is_full()) {
+            throw std::runtime_error("page is full");
+        }
+#endif
+        if (is_empty()) {
+            alloc_page();
+        }
+        if (value != NULL_INT32) {
+            set_bitmap(bitmap, num_rows());
+            data()[num_values()] = value;
+            num_values() ++;
+        } else {
+            unset_bitmap(bitmap, num_rows());
+        }
+        num_rows() ++;
+    }
+
+    Page *dump_page() override {
+        Page *result_page = page;
+        memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
+        bitmap.clear();
+        page = nullptr;
+        return result_page;
+    }
+};
+
+class TempStringPage : public TempPage {
+private:
+    uint16_t              num_rows = 0;
+    std::vector<char>     data;
+    std::vector<uint16_t> offsets;
+    std::vector<uint8_t>  bitmap;
+
+public:
+    TempStringPage() {
+        data.reserve(8192);
+        offsets.reserve(4096);
+        bitmap.reserve(512);
+    }
+
+    bool is_empty() override {
+        return num_rows == 0;
+    }
+
+    bool can_store_string(const varchar_ptr value) {
+        if(value.isLongString()){
+            return num_rows==0;
+        } else if (value.isNull()) {
+            return 4 + offsets.size() * 2 + data.size() + (num_rows / 8 + 1) <= PAGE_SIZE;
+        } else {
+            return 4 + (offsets.size() + 1) * 2 + (data.size() + value.length()) + (num_rows / 8 + 1) <= PAGE_SIZE;
+        }
+    }
+
+    void add_row(const varchar_ptr value) {
+#ifdef PROFILER
+        if (!can_store_string(value)) {
+            throw std::runtime_error("page is full");
+        }
+        if (value.length() > PAGE_SIZE - 7) {
+            throw std::runtime_error("long string is not support");
+        }
+#endif
+        if (value.isNull()) {
+            unset_bitmap(bitmap, num_rows);
+            ++num_rows;
+        } else {
+            set_bitmap(bitmap, num_rows);
+            data.resize(data.size() + value.length());
+            memcpy(data.data() + data.size() - value.length(), value.string(), value.length());
+            offsets.emplace_back(data.size());
+            ++num_rows;
+        }
+    }
+
+    Page *dump_page() override {
+        auto* page                             = new Page;
+        *reinterpret_cast<uint16_t*>(page->data)     = num_rows;
+        *reinterpret_cast<uint16_t*>(page->data + 2) = static_cast<uint16_t>(offsets.size());
+        memcpy(page->data + 4, offsets.data(), offsets.size() * 2);
+        memcpy(page->data + 4 + offsets.size() * 2, data.data(), data.size());
+        memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
+        num_rows = 0;
+        data.clear();
+        offsets.clear();
+        bitmap.clear();
+        return page;
+    }
+
+};
+
 // 调用算子next得到的结果表。每一列可能是已经实例化的，也有可能只是给出了在原表中的行号。
 // SCAN算子给出的结果都是未实例化的，并且是一段连续的行号。
 // JOIN算子会将链接键值实例化。
@@ -140,25 +302,7 @@ public:
     }
 };
 
-// 一些辅助处理Page信息的函数
 
-void set_bitmap(std::vector<uint8_t>& bitmap, uint16_t idx) {
-    while (bitmap.size() < idx / 8 + 1) {
-        bitmap.emplace_back(0);
-    }
-    auto byte_idx     = idx / 8;
-    auto bit          = idx % 8;
-    bitmap[byte_idx] |= (1u << bit);
-}
-
-void unset_bitmap(std::vector<uint8_t>& bitmap, uint16_t idx) {
-    while (bitmap.size() < idx / 8 + 1) {
-        bitmap.emplace_back(0);
-    }
-    auto byte_idx     = idx / 8;
-    auto bit          = idx % 8;
-    bitmap[byte_idx] &= ~(1u << bit);
-}
 
 // 获取页面的总行数（含NULL值）
 inline uint16_t getRowCount(const Page* page) {
