@@ -21,7 +21,7 @@
 #include "DataStructure.hpp"
 
 namespace Contest {
-#define DEBUG_LOG
+//#define DEBUG_LOG
 
 class Operator {
 public:
@@ -384,10 +384,6 @@ public:
                 assert(arg.first==DataType::INT32);
                 const int32_t* base = (int32_t*)arg.second;
                 for (size_t i = 0; i < n; ++i) {
-                    if(base[i]!=NULL_INT32 && hash_32(base[i])==NULL_HASH){
-                        std::cout<<base[i];
-                        exit(-1);
-                    }
                     assert(base[i]==NULL_INT32 || hash_32(base[i])!=NULL_HASH);
                     *(Hashmap::hash_t *)hash_target=hash_32(base[i]);
                     hash_target += hast_step;
@@ -415,10 +411,6 @@ public:
                             base++;
                         }
 
-                        if(key!=NULL_INT32 && hash_32(key)==NULL_HASH){
-                            std::cout<<key;
-                            exit(-1);
-                        }
                         assert(key==NULL_INT32 || hash_32(key)!=NULL_HASH);
                         *(Hashmap::hash_t *)hash_target=hash_32(key);
                         hash_target += hast_step;
@@ -516,20 +508,26 @@ public:
     uint32_t joinAll(){
         size_t found = 0;
         // 处理上次未完成的哈希链表
-        for (Hashmap::EntryHeader* entry = cont_.last_chain_; entry != nullptr; entry = entry->next) {
-            if (entry->hash == cont_.probe_hash_) {
-                build_matches_[found] = entry;              // 记录左表（哈希表）匹配的EntryHeader
-                probe_matches_[found] = cont_.next_probe_;  // 记录右表匹配的行号
-                found ++;
-                if (found == vec_size_) {   // 本批次已满，保存状态交给下一轮处理
-                    cont_.last_chain_ = entry->next;
-                    return vec_size_;
+        if(cont_.last_chain_!= nullptr){
+            for (Hashmap::EntryHeader* entry = cont_.last_chain_; entry != nullptr; entry = entry->next) {
+                if (entry->hash == cont_.probe_hash_) {
+                    build_matches_[found] = entry;              // 记录左表（哈希表）匹配的EntryHeader
+                    probe_matches_[found] = cont_.next_probe_;  // 记录右表匹配的行号
+                    found ++;
+                    if (found == vec_size_) {   // 本批次已满，保存状态交给下一轮处理
+                        cont_.last_chain_ = entry->next;
+                        if(cont_.last_chain_==nullptr){
+                            cont_.next_probe_++;    // 如果本次的哈希链其实已经处理完毕
+                        }
+
+                        return vec_size_;
+                    }
                 }
             }
+            cont_.next_probe_++;
         }
-        if (cont_.last_chain_ != nullptr){
-            cont_.next_probe_++;    // 如果cont_.last_chain_==null，说明刚刚处理了上次未处理完的哈希链。此时上次的哈希链表已经处理完成了，next_probe_推进一行。
-        }
+
+
         for (size_t i = cont_.next_probe_, end = cont_.num_probe_; i < end; i++) {
             Hashmap::hash_t hash = probe_hashes_[i];
             for (auto entry = shared_.hashmap_.find_chain_tagged(hash); entry != nullptr; entry = entry->next) {

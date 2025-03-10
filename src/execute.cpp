@@ -23,6 +23,7 @@ struct JoinAlgorithm {
     ExecuteResult&                                   results;
     size_t                                           left_col, right_col;
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
+    size_t                                           node_idx;
 
     template <class T>
     auto run() {
@@ -122,15 +123,16 @@ struct JoinAlgorithm {
 
 ExecuteResult execute_hash_join(const Plan&          plan,
     const JoinNode&                                  join,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
+    size_t node_idx) {
     auto                           left_idx    = join.left;
     auto                           right_idx   = join.right;
     auto&                          left_node   = plan.nodes[left_idx];
     auto&                          right_node  = plan.nodes[right_idx];
     auto&                          left_types  = left_node.output_attrs;
     auto&                          right_types = right_node.output_attrs;
-    auto                           left        = execute_impl(plan, left_idx);
     auto                           right       = execute_impl(plan, right_idx);
+    auto                           left        = execute_impl(plan, left_idx);
     std::vector<std::vector<Data>> results;
 
     JoinAlgorithm join_algorithm{.build_left = join.build_left,
@@ -139,7 +141,8 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         .results                             = results,
         .left_col                            = join.left_attr,
         .right_col                           = join.right_attr,
-        .output_attrs                        = output_attrs};
+        .output_attrs                        = output_attrs,
+        .node_idx                            = node_idx};
     if (join.build_left) {
         switch (std::get<1>(left_types[join.left_attr])) {
         case DataType::INT32:   join_algorithm.run<int32_t>(); break;
@@ -156,19 +159,43 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         }
     }
 
+//    // 打印结果
+//    std::ostringstream oss;
+//    oss << "join "<< node_idx <<" output rows: " << results.size() << ", details:\n";
+//    for (const auto &row : results) {
+//        for (const auto &data : row) {
+//            std::visit([&](auto&& d) {
+//                using T = std::decay_t<decltype(d)>;
+//                if constexpr (std::is_same_v<T, int32_t>) {
+//                    oss << d << "\t\t"; // 输出 int32_t
+//                } else if constexpr (std::is_same_v<T, std::basic_string<char>>) {
+//                    oss << d << "\t\t"; // 输出字符串
+//                } else if constexpr (std::is_same_v<T, std::monostate>) {
+//                    oss << "NULL\t\t";
+//                } else {
+//                    throw std::runtime_error("Unsupported data type");
+//                }
+//            }, data);
+//        }
+//        oss << "\n";
+//    }
+//    oss << "\n";
+//
+//    std::ofstream log("log_true.txt", std::ios::app);
+//    log << oss.str();
+//    log.close();
+
     return results;
 }
 
 ExecuteResult execute_scan(const Plan&               plan,
     const ScanNode&                                  scan,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
+    size_t node_idx) {
     auto                           table_id = scan.base_table_id;
     auto&                          input    = plan.inputs[table_id];
     auto                           table    = Table::from_columnar(input);
     std::vector<std::vector<Data>> results;
-    for (auto [col_idx, _]: output_attrs) {
-        printf("scan col %lu\n", col_idx);
-    }
     for (auto& record: table.table()) {
         std::vector<Data> new_record;
         new_record.reserve(output_attrs.size());
@@ -186,9 +213,9 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
         [&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
-                return execute_hash_join(plan, value, node.output_attrs);
+                return execute_hash_join(plan, value, node.output_attrs,node_idx);
             } else {
-                return execute_scan(plan, value, node.output_attrs);
+                return execute_scan(plan, value, node.output_attrs,node_idx);
             }
         },
         node.data);
@@ -249,8 +276,48 @@ std::unique_ptr<ResultWriter> getPlan(const Plan& plan, SharedStateManager& shar
     return std::move(result_writer);
 }
 
+void test_hash(){
+    std::vector<uint32_t> hash_to_key((uint32_t)0xFFFFFFFF, 0);
+    std::vector<bool> is_key_repeat((uint32_t)0xFFFFFFFF, false);
+
+    uint32_t h0 = hash_32(0);
+
+    uint32_t key = 0;
+    do {
+        uint32_t h = hash_32(key);
+        if(h==h0){
+            is_key_repeat[key]=true;
+        } else if(hash_to_key[h]==0){
+            hash_to_key[h]=key;
+        } else {
+            is_key_repeat[hash_to_key[h]]=true;
+            is_key_repeat[key]=true;
+        }
+    } while (key++ != 0xFFFFFFFF);
+
+    std::ofstream file("unrepeat_key.txt", std::ios::app);
+    // 从int32的最小值开始，输出不碰撞的key
+    int32_t test_num=10000;
+    int32_t skey=NULL_INT32;
+    for(int32_t i=0; i<test_num;skey++,i++){
+        if(!is_key_repeat[(uint32_t)skey]){
+            file<<skey<<std::endl;
+        }
+    }
+    file.close();
+    exit(1);
+}
+
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-    const int thread_num = 4;                           // 线程数（包括主线程）
+//    namespace views = ranges::views;
+//    auto ret        = execute_impl(plan, plan.root);
+//    auto ret_types  = plan.nodes[plan.root].output_attrs
+//                   | views::transform([](const auto& v) { return std::get<1>(v); })
+//                   | ranges::to<std::vector<DataType>>();
+//    Table table{std::move(ret), std::move(ret_types)};
+//    return table.to_columnar();
+
+    const int thread_num = 24;                          // 线程数（包括主线程）
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
     std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
@@ -315,8 +382,10 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     delete global_profiler;
     global_profiler = nullptr;
 
+    std::this_thread::sleep_for(std::chrono::seconds(1));   // 让cpu休息一下吧 :)
     return result;
 }
+
 
 void* build_context() {
     return nullptr;
