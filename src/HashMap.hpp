@@ -3,6 +3,7 @@
 #include "assert.h"
 
 namespace Contest {
+#define NULL_HASH (1642857263)  // 这是NULL_INT32算出的哈希值（祈祷它不会发生碰撞）
 
 class Hashmap {
 public:
@@ -95,12 +96,16 @@ inline Hashmap::EntryHeader* Hashmap::update(Hashmap::EntryHeader* old,
 }
 
 inline Hashmap::EntryHeader* Hashmap::find_chain(hash_t hash) {
+    if(hash == NULL_HASH) return nullptr;   // 如果是NULL值对应的hash值，返回nullptr。
+
     auto pos = hash & mask;
     return entries[pos].load(std::memory_order_relaxed);
 }
 
 template <bool concurrentInsert>
 void inline Hashmap::insert(EntryHeader* entry, hash_t hash) {
+    if(hash == NULL_HASH) return;   // 如果是NULL值对应的hash值，不插入直接返回。
+
     const size_t pos = hash & mask;
     assert(pos <= mask);
     assert(pos < capacity);
@@ -125,6 +130,8 @@ void inline Hashmap::insert(EntryHeader* entry, hash_t hash) {
 }
 
 inline Hashmap::EntryHeader* Hashmap::find_chain_tagged(hash_t hash) {
+    if(hash == NULL_HASH) return nullptr;   // 如果是NULL值对应的hash值，返回nullptr。
+
     //static_assert(sizeof(hash_t) == 8, "Hashtype not supported");
     auto pos = hash & mask;
     auto candidate = entries[pos].load(std::memory_order_relaxed);
@@ -146,6 +153,8 @@ inline Hashmap::EntryHeader* Hashmap::find_chain_tagged(hash_t hash) {
 
 template <bool concurrentInsert>
 void inline Hashmap::insert_tagged(EntryHeader* entry, hash_t hash) {
+    if(hash == NULL_HASH) return;   // 如果是NULL值对应的hash值，不插入直接返回。
+
     const size_t pos = hash & mask;
     assert(pos <= mask);
     assert(pos < capacity);
@@ -236,7 +245,8 @@ uint32_t hash_32(uint32_t key, uint32_t seed=4000932304){
     h1 = rotl32(h1,13);
     h1 = h1*5+0xe6546b64;
 
-    return fmix32(h1);
+    uint32_t hash = fmix32(h1);
+    return hash;
 }
 
 }

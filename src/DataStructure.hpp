@@ -5,12 +5,15 @@
 #include "sstream"
 
 namespace Contest {
-
 #define FULL_INT32_PAGE (1984)
 
 #define NULL_INT32 (-2147483648)
 
 #define NULL_VARCHAR 0
+
+#define LONG_STRING_START (0xffff)
+
+#define LOGNG_STRING_FOLLOW (0xfffe)
 
 struct varchar_ptr {
     uint64_t ptr_ = {0};
@@ -112,8 +115,16 @@ public:
                             } else {
                                 oss << "NULL" << "\t\t";
                             }
-                        } else {
-                            if (!ptr[i].isNull()) {
+                        } else if constexpr (std::is_same_v<T, const varchar_ptr*>){
+                            if(ptr[i].isLongString()){
+                                std::string long_str;
+                                uint16_t page_num = ptr[i].longStringPageNum();  // 该Long String有多少页
+                                Page* const* page_start = ptr[i].longStringPage();
+                                for(size_t k=0; k<page_num; k++){
+                                    long_str.append((const char*)(page_start[k]->data + 4), *reinterpret_cast<const uint16_t*>(page_start[k]->data + 2));
+                                }
+                                oss << long_str << "\t\t";
+                            } else if (!ptr[i].isNull()) {
                                 oss << std::string(ptr[i].string(), ptr[i].length()) << "\t\t";
                             } else {
                                 oss << "NULL" << "\t\t";
@@ -199,6 +210,8 @@ inline bool isNotNull(const uint8_t* bitmap, uint16_t idx) {
 
 // 计算位图的前n个元素有多少个不为NULL
 size_t getNonNullCount(const uint8_t* bitmap, uint16_t n) {
+    if(n==0) return 0;
+
     int      count          = 0;
     uint16_t full_bytes     = n / 8;
     uint8_t  remaining_bits = n % 8;
@@ -220,11 +233,228 @@ size_t getNonNullCount(const uint8_t* bitmap, uint16_t n) {
 
 // 判断一个页是否是Long String的起始页
 inline bool isLongStringStart(const Page* page) {
-    return getRowCount(page) == 0xffff;
+    return getRowCount(page) == LONG_STRING_START;
 }
 
 // 判断一个页是否是Long String的后续页
-inline bool isLongStringFollowing(const Page* page) {
-    return getRowCount(page) == 0xfffe;
+inline bool isLongStringFollow(const Page* page) {
+    return getRowCount(page) == LOGNG_STRING_FOLLOW;
 }
+
+// 获取VARCHAR页面含有的字符串数
+inline uint16_t getStringCount(const Page* page) {
+    uint16_t first16 = getRowCount(page);
+    if(first16==LONG_STRING_START){
+        return 1;
+    } else if(first16==LOGNG_STRING_FOLLOW){
+        return 0;
+    } else{
+        return first16;
+    }
+}
+
+
+// 将InstantiatedColumn的值读取出来，并存储到指定位置。
+// input_column: 要读取的ColumnVariant
+// n: 读取的行数
+// col_target: 存储到的位置
+// col_step: col_target每次移动的步长
+// SpecifiedIndex: 从指定的下标数组中读取行号，而不是连续的n行
+// idx: 指定行的下标数组。下标数组必须递增。下标数组大小必须大于等于n+1!!!
+template <bool SpecifiedIndex>
+void gatherInstantiatedCol(OperatorResultTable::InstantiatedColumn input_column, size_t n, uint8_t* col_target, size_t col_step, const uint32_t* idx=nullptr){
+    // 已实例化的列为 std::pair<DataType, void*>。
+    if(input_column.first==DataType::INT32){
+        const int32_t* base = (int32_t*)input_column.second;
+        for (size_t i = 0; i < n; ++i) {
+            if constexpr (SpecifiedIndex){
+                *(int32_t*)(col_target) = base[idx[i]];
+            } else {
+                *(int32_t*)(col_target) = base[i];
+            }
+            col_target += col_step;
+        }
+    } else if(input_column.first==DataType::VARCHAR){
+        const uint64_t* base = (uint64_t*)input_column.second;
+        for (size_t i = 0; i < n; ++i) {
+            if constexpr (SpecifiedIndex){
+                *(uint64_t*)(col_target) = base[idx[i]];
+            } else {
+                *(uint64_t*)(col_target) = base[i];
+            }
+            col_target += col_step;
+        }
+    } else {
+        throw std::runtime_error("Unsupported data type");
+    }
+}
+
+
+// 将ContinuousColumn的连续n行的值读取出来，并存储到指定位置。
+// input_column: 要读取的ColumnVariant
+// n: 读取的行数
+// col_target: 存储到的位置
+// col_step: col_target每次移动的步长
+void gatherContinuousCol(OperatorResultTable::ContinuousColumn input_column, size_t n, uint8_t* col_target, size_t col_step){
+    // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>
+    const Column* col = std::get<0>(input_column);
+    if(col->type==DataType::INT32) {
+        for(size_t i=std::get<1>(input_column); i<col->pages.size(); i++){
+            const Page* current_page = col->pages[i];                       // 要读取的页面
+            const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
+            size_t start_row = i==std::get<1>(input_column) ? std::get<2>(input_column) : 0;  // 本页的起始行
+            size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
+            const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
+
+            for (size_t j=start_row; j<end_row; j++) {
+                if (isNotNull(bitmap, j)) {
+                    *(int32_t*)(col_target) = *(base++);
+                } else {
+                    *(int32_t*)(col_target) = NULL_INT32;
+                }
+                col_target += col_step;
+            }
+
+            n -= end_row-start_row;
+            if(n<=0) break;
+        }
+
+    } else if(col->type==DataType::VARCHAR){
+        for(size_t i=std::get<1>(input_column); i<col->pages.size(); i++){
+            const Page* current_page = col->pages[i];                       // 要读取的页面
+            assert(!isLongStringFollow(current_page));
+
+            if(isLongStringStart(current_page)){    // 如果当前页面是Long String起始页
+                // 寻找Long String一共有多少页
+                size_t end_page = i+1;
+                while(end_page<col->pages.size() && isLongStringFollow(col->pages[end_page])){
+                    end_page++;
+                }
+                varchar_ptr ptr(&col->pages[i],end_page-i);
+                *(uint64_t *)(col_target) = ptr.ptr_;
+                col_target += col_step;
+                n -= 1;
+                i = end_page-1;
+            } else {    // 否则该页是普通页
+                const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
+                size_t start_row = i==std::get<1>(input_column) ? std::get<2>(input_column) : 0;  // 本页的起始行
+                size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
+                const char* base = getPageData<char>(current_page);             // 本页数据的起始指针
+                const uint16_t* current_offset = getVarcharOffset(current_page) + getNonNullCount(bitmap, start_row);  // 当前字符串的结尾的偏移量
+                uint16_t last_offset = getNonNullCount(bitmap, start_row)==0 ? 0 : *(current_offset-1);                // 当前字符串的开头的偏移量
+
+                for (size_t j=start_row; j<end_row; j++) {
+                    if (isNotNull(bitmap, j)) {
+                        varchar_ptr ptr(base + last_offset,*current_offset - last_offset);
+                        *(uint64_t *)(col_target) = ptr.ptr_;
+                        last_offset = *current_offset;
+                        current_offset ++;
+                    } else {
+                        *(uint64_t *)(col_target) = NULL_VARCHAR;
+                    }
+                    col_target += col_step;
+                }
+
+                n -= end_row-start_row;
+            }
+            if(n<=0) break;
+        }
+    } else {
+        throw std::runtime_error("Unsupported data type");
+    }
+}
+
+
+// 将InstantiatedColumn的由idx指定的n行的值读取出来，并存储到指定位置。
+// input_column: 要读取的ColumnVariant
+// n: 读取的行数
+// col_target: 存储到的位置
+// col_step: col_target每次移动的步长
+// idx: 指定行的下标数组。下标数组必须递增。下标数组大小必须大于等于n+1!!!
+void gatherContinuousColWithIndex(OperatorResultTable::ContinuousColumn input_column, size_t n, uint8_t* col_target, size_t col_step, const uint32_t* idx){
+    // 假设下标数组idx是递增的
+    const Column* col = std::get<0>(input_column);
+    Page *const * current_page = col->pages.data() + std::get<1>(input_column);
+    uint32_t offset = idx[0] + std::get<2>(input_column);
+    if(col->type==DataType::INT32) {
+        for(uint32_t i=0; i<n; i++){
+            // 定位到probe_matches_[i]所在的Page，和页内偏移
+            while(offset >= getRowCount(*current_page)){
+                offset -= getRowCount(*current_page);
+                current_page++;
+            }
+            const uint8_t* bitmap = getBitmap(*current_page);
+
+            // 取出数据
+            if(isNotNull(bitmap, offset)){
+                const int32_t* data_ptr = getPageData<int32_t>(*current_page) + getNonNullCount(bitmap, offset);
+                *(int32_t*)(col_target) = *data_ptr;
+            } else {
+                *(int32_t*)(col_target) = NULL_INT32;
+            }
+
+            col_target += col_step;
+            offset += idx[i+1] - idx[i]; // 假设下标数组idx是递增的
+        }
+    } else if(col->type==DataType::VARCHAR){
+        for(uint32_t i=0; i<n; i++){
+            // 定位到probe_matches_[i]所在的Page，和页内偏移
+            while(offset >= getStringCount(*current_page)){
+                offset -= getStringCount(*current_page);
+                current_page++;
+            }
+
+            if(isLongStringStart(*current_page)){
+                Page *const * end_page = current_page+1;
+                while(end_page!=col->pages.data()+col->pages.size() && isLongStringFollow(*end_page)){
+                    end_page++;
+                }
+                varchar_ptr ptr(current_page,end_page-current_page);
+                *(uint64_t *)(col_target) = ptr.ptr_;
+                current_page = end_page;
+                offset = 0; // offset强制设为0，因为下一个条目必然从新页开始
+            } else {
+                const uint8_t* bitmap = getBitmap(*current_page);
+                if(isNotNull(bitmap, offset)){
+                    // 获取varchar的起始和终止位置
+                    size_t non_null = getNonNullCount(bitmap,offset);
+                    const uint16_t* str_end = getVarcharOffset(*current_page) + non_null;
+                    uint16_t str_begin = non_null==0 ? 0 : *(str_end-1);
+                    varchar_ptr ptr(getPageData<char>(*current_page) + str_begin,*str_end - str_begin);
+                    *(uint64_t *)(col_target) = ptr.ptr_;
+                } else {
+                    *(uint64_t*)(col_target) = NULL_VARCHAR;
+                }
+                offset += idx[i+1] - idx[i]; // 假设下标数组idx是递增的
+            }
+            col_target += col_step;
+
+        }
+    } else {
+        throw std::runtime_error("Unsupported data type");
+    }
+}
+
+
+// 将ColumnVariant的值读取出来，并存储到指定位置
+// input_column: 要读取的ColumnVariant
+// n: 读取的行数
+// col_target: 存储到的位置
+// col_step: col_target每次移动的步长
+// SpecifiedIndex: 从指定的下标数组中读取行号，而不是连续的n行
+// idx: 指定行的下标数组。下标数组必须递增。下标数组大小必须大于等于n+1!!!
+template <bool SpecifiedIndex>
+void gatherCol(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* col_target, size_t col_step, const uint32_t* idx=nullptr){
+    std::visit([&](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
+            gatherInstantiatedCol<SpecifiedIndex>(arg, n, col_target, col_step, idx);
+        } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn> & !SpecifiedIndex) {
+            gatherContinuousCol(arg, n, col_target, col_step);
+        } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn> & SpecifiedIndex){
+            gatherContinuousColWithIndex(arg, n, col_target, col_step, idx);
+        }
+    }, input_column);
+}
+
 }

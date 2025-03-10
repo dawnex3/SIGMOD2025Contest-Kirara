@@ -21,7 +21,7 @@
 #include "DataStructure.hpp"
 
 namespace Contest {
-//#define DEBUG_LOG
+#define DEBUG_LOG
 
 class Operator {
 public:
@@ -105,6 +105,13 @@ public:
 
                 for(uint32_t i=start_page; i<pages.size(); i++){
                     uint16_t page_rows = getRowCount(pages[i]);
+                    if(page_rows==LONG_STRING_START){
+                        // 如果是LONG STRING的起始页
+                        page_rows=1;
+                    } else if(page_rows==LOGNG_STRING_FOLLOW){
+                        // 如果是LONG STRING的后续页
+                        page_rows=0;
+                    }
                     if (offset_this_page < page_rows) {
                         // 如果偏移在当前页范围内，更新页号和页内偏移
                         std::get<1>(continuous_column) = i;              // 更新为当前页码
@@ -251,7 +258,6 @@ public:
         free(queue_probe_);
         free(queue_build_);
     }
-
     size_t resultColumnNum() override{
         return last_result_.columns_.size();
     }
@@ -328,8 +334,8 @@ public:
                     // 打印该节点输出的总行数
 //                    printf("join output rows: %ld, details:\n",total_output);
 //                    std::cout<<table_str<<std::endl;
-                    std::ofstream log("log.txt", std::ios::app);
-                    log << "join output rows: " << total_output << ", details:\n";
+                    std::ofstream log("log_false.txt", std::ios::app);
+                    log << "join "<< shared_.get_operator_id()-1 <<" output rows: " << total_output << ", details:\n";
                     log << table_str <<std::endl;
                     log.close();
 #endif
@@ -368,7 +374,7 @@ public:
     }
 
 
-    // 计算一列的哈希值，并存储到指定位置。该列必须为INT32，不含NULL
+    // 计算一列的哈希值，并存储到指定位置。该列必须为INT32
     template <bool RestoreColumn>   //可选：将列值本身也存储到指定位置
     void calculateColHash(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* hash_target, size_t hast_step, uint8_t* col_target=nullptr, size_t col_step=0){
         std::visit([&](auto&& arg) {
@@ -378,6 +384,11 @@ public:
                 assert(arg.first==DataType::INT32);
                 const int32_t* base = (int32_t*)arg.second;
                 for (size_t i = 0; i < n; ++i) {
+                    if(base[i]!=NULL_INT32 && hash_32(base[i])==NULL_HASH){
+                        std::cout<<base[i];
+                        exit(-1);
+                    }
+                    assert(base[i]==NULL_INT32 || hash_32(base[i])!=NULL_HASH);
                     *(Hashmap::hash_t *)hash_target=hash_32(base[i]);
                     hash_target += hast_step;
                     if constexpr (RestoreColumn){
@@ -386,9 +397,41 @@ public:
                     }
                 }
             } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn>) {
-                // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>，它存放在多个Page中。它作为键值，必须是非空的
+                // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>，它存放在多个Page中。
                 const Column* col = std::get<0>(arg);
                 assert(col->type==DataType::INT32);
+
+//                for(size_t i=std::get<1>(arg); i<col->pages.size(); i++){
+//                    const Page* current_page = col->pages[i];                       // 要读取的页面
+//                    const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
+//                    size_t start_row = i==std::get<1>(arg) ? std::get<2>(arg) : 0;  // 本页的起始行
+//                    size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
+//                    const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
+//
+//                    for (size_t j=start_row; j<end_row; j++) {
+//                        int32_t key=NULL_INT32;
+//                        if (isNotNull(bitmap, j)) {
+//                            key=*base;
+//                            base++;
+//                        }
+//
+//                        if(key!=NULL_INT32 && hash_32(key)==NULL_HASH){
+//                            std::cout<<key;
+//                            exit(-1);
+//                        }
+//                        assert(key==NULL_INT32 || hash_32(key)!=NULL_HASH);
+//                        *(Hashmap::hash_t *)hash_target=hash_32(key);
+//                        hash_target += hast_step;
+//                        if constexpr (RestoreColumn){
+//                            *(int32_t*)(col_target) = key;
+//                            col_target += col_step;
+//                        }
+//                    }
+//
+//                    n -= end_row-start_row;
+//                    if(n<=0) break;
+//                }
+
                 Page *const * current_page = col->pages.data() + std::get<1>(arg);
                 size_t row_num_this_page = std::min((size_t)FULL_INT32_PAGE - std::get<2>(arg), n);
                 const int32_t* base = getPageData<int32_t>(*current_page) + std::get<2>(arg);
@@ -408,159 +451,6 @@ public:
                 }while (n>0);
             }
         }, input_column);
-    }
-
-
-    // 收集一列的值，并存储到指定位置。
-    template <bool SpecifiedIndex>   //可选：指定行的下标数组。下标数组必须递增。下标数组大小必须大于等于n+1
-    void gatherCol(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* col_target, size_t col_step, const uint32_t* idx=nullptr){
-        std::visit([&](auto&& arg) {
-            using T = std::decay_t<decltype(arg)>;
-            if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
-                // 已实例化的列为 std::pair<DataType, void*>。
-                if(arg.first==DataType::INT32){
-                    const int32_t* base = (int32_t*)arg.second;
-                    for (size_t i = 0; i < n; ++i) {
-                        if constexpr (SpecifiedIndex){
-                            *(int32_t*)(col_target) = base[idx[i]];
-                        } else {
-                            *(int32_t*)(col_target) = base[i];
-                        }
-                        col_target += col_step;
-                    }
-                } else if(arg.first==DataType::VARCHAR){
-                    const uint64_t* base = (uint64_t*)arg.second;
-                    for (size_t i = 0; i < n; ++i) {
-                        if constexpr (SpecifiedIndex){
-                            *(uint64_t*)(col_target) = base[idx[i]];
-                        } else {
-                            *(uint64_t*)(col_target) = base[i];
-                        }
-                        col_target += col_step;
-                    }
-                }
-            } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn> & !SpecifiedIndex) {
-                // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>
-                const Column* col = std::get<0>(arg);
-                Page *const * current_page = col->pages.data() + std::get<1>(arg);
-                size_t start_row = std::get<2>(arg);
-                if(col->type==DataType::INT32) {
-                    const uint8_t* bitmap = getBitmap(*current_page);
-                    size_t num_rows = std::min((size_t)getRowCount(*current_page) - std::get<2>(arg), n);
-                    const int32_t* base = getPageData<int32_t>(*current_page) + getNonNullCount(bitmap, start_row);
-                    do{
-                        for (size_t i=start_row; i < num_rows+start_row; i++) {
-                            if (isNotNull(bitmap, i)) {
-                                *(int32_t*)(col_target) = *(base++);
-                            } else {
-                                *(int32_t*)(col_target) = NULL_INT32;
-                            }
-                            col_target += col_step;
-                        }
-                        n -= num_rows;
-                        if(n>0){
-                            current_page++;
-                            base = getPageData<int32_t>(*current_page);
-                            bitmap = getBitmap(*current_page);
-                            num_rows = std::min((size_t)getRowCount(*current_page), n);
-                        }
-                    } while (n>0);
-                } else if(col->type==DataType::VARCHAR){
-                    const uint8_t* bitmap = getBitmap(*current_page);
-                    size_t num_rows = std::min((size_t)getRowCount(*current_page) - std::get<2>(arg), n);
-                    size_t non_null = getNonNullCount(bitmap,start_row);
-                    const uint16_t* str_end = getVarcharOffset(*current_page) + non_null;
-                    uint16_t str_begin = non_null==0 ? 0 : *(str_end-1);
-                    do{
-                        const char* base = getPageData<char>(*current_page);
-                        for (size_t i=start_row; i < num_rows+start_row; i++) {
-                            if (isNotNull(bitmap, i)) {
-                                *(uint64_t *)(col_target) = ((uint64_t)(*str_end - str_begin)<<48) | (uint64_t)(base + str_begin);
-                                str_begin = *str_end;
-                                str_end ++;
-                            } else {
-                                *(uint64_t *)(col_target) = NULL_VARCHAR;
-                            }
-                            col_target += col_step;
-                        }
-                        n -= num_rows;
-                        if(n>0){
-                            current_page++;
-                            bitmap = getBitmap(*current_page);
-                            num_rows = std::min((size_t)getRowCount(*current_page), n);
-                            str_end = getVarcharOffset(*current_page);
-                            str_begin = 0;
-                        }
-                    } while (n>0);
-                }
-            } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn> & SpecifiedIndex){
-                // 假设下标数组idx是递增的
-                const Column* col = std::get<0>(arg);
-                Page *const * current_page = col->pages.data() + std::get<1>(arg);
-                uint32_t offset = idx[0] + std::get<2>(arg);
-                const uint8_t* bitmap = getBitmap(*current_page);
-                if(col->type==DataType::INT32) {
-                    for(uint32_t i=0; i<n; i++){
-                        // 定位到probe_matches_[i]所在的Page，和页内偏移
-                        while(offset >= getRowCount(*current_page)){
-                            offset -= getRowCount(*current_page);
-                            current_page++;
-                            bitmap = getBitmap(*current_page);
-                        }
-
-                        // 取出数据
-                        if(isNotNull(bitmap, offset)){
-                            const int32_t* data_ptr = getPageData<int32_t>(*current_page) + getNonNullCount(bitmap, offset);
-                            *(int32_t*)(col_target) = *data_ptr;
-                        } else {
-                            *(int32_t*)(col_target) = NULL_INT32;
-                        }
-
-                        col_target += col_step;
-                        offset += idx[i+1] - idx[i]; // 假设下标数组idx是递增的
-                    }
-                } else if(col->type==DataType::VARCHAR){
-                    for(uint32_t i=0; i<n; i++){
-                        // 定位到probe_matches_[i]所在的Page，和页内偏移
-                        while(offset >= getRowCount(*current_page)){
-                            offset -= getRowCount(*current_page);
-                            current_page++;
-                            bitmap = getBitmap(*current_page);
-                        }
-
-                        // 取出数据
-                        if(isNotNull(bitmap, offset)){
-                            // 获取varchar的起始和终止位置
-                            size_t non_null = getNonNullCount(bitmap,offset);
-                            const uint16_t* str_end = getVarcharOffset(*current_page) + non_null;
-                            uint16_t str_begin = non_null==0 ? 0 : *(str_end-1);
-                            *(uint64_t *)(col_target) = ((uint64_t)(*str_end - str_begin)<<48) | (uint64_t)(getPageData<char>(*current_page) + str_begin);
-                        } else {
-                            *(uint64_t*)(col_target) = NULL_VARCHAR;
-                        }
-
-                        col_target += col_step;
-                        offset += idx[i+1] - idx[i]; // 假设下标数组idx是递增的
-                    }
-                }
-            }
-        }, input_column);
-    }
-
-
-    // 收集build_matches_中的值，并存储到指定的InstantiatedColumn中
-    void gatherEntry(OperatorResultTable::InstantiatedColumn output_column, uint32_t n, size_t offset){
-        if(output_column.first==DataType::INT32){
-            int32_t* base = (int32_t*)output_column.second;
-            for(uint32_t i=0; i<n; i++){
-                base[i] = *(int32_t*)((uint8_t*)build_matches_[i] + offset);
-            }
-        } else if(output_column.first==DataType::VARCHAR){
-            uint64_t * base = (uint64_t*)output_column.second;
-            for(uint32_t i=0; i<n; i++){
-                base[i] = *(uint64_t*)((uint8_t*)build_matches_[i] + offset);
-            }
-        }
     }
 
 
@@ -587,6 +477,38 @@ public:
             } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn>) {
                 // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>。
                 const Column* col = std::get<0>(arg);
+
+                // 支持含null列
+//                assert(col->type==DataType::INT32);
+//                size_t compared = 0;
+//
+//                for(size_t i=std::get<1>(arg); i<col->pages.size(); i++){
+//                    const Page* current_page = col->pages[i];                       // 要读取的页面
+//                    const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
+//                    size_t start_row = i==std::get<1>(arg) ? std::get<2>(arg) : 0;  // 本页的起始行
+//                    size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
+//                    const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
+//
+//                    for (size_t j=start_row; j<end_row; j++, compared++) {
+//                        if(!isNotNull(bitmap, j)){  // 空值不匹配
+//                            continue;
+//                        }
+//                        int32_t right_key=*base;
+//                        base++;
+//
+//                        int32_t left_key = *(int32_t*)((uint8_t*)build_matches_[compared] + key_offset);
+//                        if(left_key == right_key){
+//                            build_matches_[found] = build_matches_[compared];
+//                            probe_matches_[found] = probe_matches_[compared];
+//                            found++;
+//                        }
+//                    }
+//
+//                    n -= end_row-start_row;
+//                    if(n<=0) break;
+//                }
+
+                // 不支持含null列
                 uint32_t start_page = std::get<1>(arg);
                 uint32_t start_row = std::get<2>(arg);
                 assert(col->type==DataType::INT32);
@@ -606,6 +528,22 @@ public:
         }, right_col);
 
         return found;
+    }
+
+
+    // 收集build_matches_中的值，并存储到指定的InstantiatedColumn中
+    void gatherEntry(OperatorResultTable::InstantiatedColumn output_column, uint32_t n, size_t offset){
+        if(output_column.first==DataType::INT32){
+            int32_t* base = (int32_t*)output_column.second;
+            for(uint32_t i=0; i<n; i++){
+                base[i] = *(int32_t*)((uint8_t*)build_matches_[i] + offset);
+            }
+        } else if(output_column.first==DataType::VARCHAR){
+            uint64_t * base = (uint64_t*)output_column.second;
+            for(uint32_t i=0; i<n; i++){
+                base[i] = *(uint64_t*)((uint8_t*)build_matches_[i] + offset);
+            }
+        }
     }
 
 
@@ -757,6 +695,7 @@ public:
     public:
         virtual Page *dump_page() = 0;
         virtual bool is_empty() = 0;
+        virtual ~TempPage() = default;
     };
 
     class TempIntPage : public TempPage {
@@ -848,7 +787,9 @@ public:
         }
 
         bool can_store_string(const varchar_ptr value) {
-            if (value.isNull()) {
+            if(value.isLongString()){
+                return num_rows==0;
+            } else if (value.isNull()) {
                 return 4 + offsets.size() * 2 + data.size() + (num_rows / 8 + 1) <= PAGE_SIZE;
             } else {
                 return 4 + (offsets.size() + 1) * 2 + (data.size() + value.length()) + (num_rows / 8 + 1) <= PAGE_SIZE;
@@ -942,14 +883,28 @@ public:
                     continue;
                 } else if (from_column.first==DataType::VARCHAR){
                     TempStringPage *temp = (TempStringPage *)unfilled_page_[i].get();
-                    varchar_ptr *fomr_data = (varchar_ptr *)from_column.second;
+                    varchar_ptr *from_data = (varchar_ptr *)from_column.second;
 
                     for (int j = 0; j < rows; ++j) {
-                        auto value = fomr_data[j];
-                        if (!temp->can_store_string(value)) {
-                            pages.emplace_back(temp->dump_page());
+                        auto value = from_data[j];
+                        if(value.isLongString()){
+                            // 先将temp page清空输出
+                            if(!temp->is_empty()){
+                                pages.emplace_back(temp->dump_page());
+                            }
+                            uint16_t page_num = value.longStringPageNum();  // 该Long String有多少页
+                            Page* const* page_start = value.longStringPage();
+                            for(size_t k=0; k<page_num; k++){
+                                Page* copy_page = new Page;
+                                memcpy(copy_page->data,page_start[k]->data,PAGE_SIZE);
+                                pages.emplace_back(copy_page);
+                            }
+                        } else {
+                            if (!temp->can_store_string(value)) {
+                                pages.emplace_back(temp->dump_page());
+                            }
+                            temp->add_row(value);
                         }
-                        temp->add_row(value);
                     }
                     continue;
                 } else {
