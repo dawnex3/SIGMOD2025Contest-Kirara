@@ -401,54 +401,37 @@ public:
                 const Column* col = std::get<0>(arg);
                 assert(col->type==DataType::INT32);
 
-//                for(size_t i=std::get<1>(arg); i<col->pages.size(); i++){
-//                    const Page* current_page = col->pages[i];                       // 要读取的页面
-//                    const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
-//                    size_t start_row = i==std::get<1>(arg) ? std::get<2>(arg) : 0;  // 本页的起始行
-//                    size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
-//                    const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
-//
-//                    for (size_t j=start_row; j<end_row; j++) {
-//                        int32_t key=NULL_INT32;
-//                        if (isNotNull(bitmap, j)) {
-//                            key=*base;
-//                            base++;
-//                        }
-//
-//                        if(key!=NULL_INT32 && hash_32(key)==NULL_HASH){
-//                            std::cout<<key;
-//                            exit(-1);
-//                        }
-//                        assert(key==NULL_INT32 || hash_32(key)!=NULL_HASH);
-//                        *(Hashmap::hash_t *)hash_target=hash_32(key);
-//                        hash_target += hast_step;
-//                        if constexpr (RestoreColumn){
-//                            *(int32_t*)(col_target) = key;
-//                            col_target += col_step;
-//                        }
-//                    }
-//
-//                    n -= end_row-start_row;
-//                    if(n<=0) break;
-//                }
+                for(size_t i=std::get<1>(arg); i<col->pages.size(); i++){
+                    const Page* current_page = col->pages[i];                       // 要读取的页面
+                    const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
+                    size_t start_row = i==std::get<1>(arg) ? std::get<2>(arg) : 0;  // 本页的起始行
+                    size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
+                    const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
 
-                Page *const * current_page = col->pages.data() + std::get<1>(arg);
-                size_t row_num_this_page = std::min((size_t)FULL_INT32_PAGE - std::get<2>(arg), n);
-                const int32_t* base = getPageData<int32_t>(*current_page) + std::get<2>(arg);
-                do{
-                    for (size_t i = 0; i < row_num_this_page; ++i) {
-                        *(Hashmap::hash_t *)hash_target=hash_32(base[i]);
+                    for (size_t j=start_row; j<end_row; j++) {
+                        int32_t key=NULL_INT32;
+                        if (isNotNull(bitmap, j)) {
+                            key=*base;
+                            base++;
+                        }
+
+                        if(key!=NULL_INT32 && hash_32(key)==NULL_HASH){
+                            std::cout<<key;
+                            exit(-1);
+                        }
+                        assert(key==NULL_INT32 || hash_32(key)!=NULL_HASH);
+                        *(Hashmap::hash_t *)hash_target=hash_32(key);
                         hash_target += hast_step;
                         if constexpr (RestoreColumn){
-                            *(int32_t*)(col_target) = base[i];
+                            *(int32_t*)(col_target) = key;
                             col_target += col_step;
                         }
                     }
-                    n -= row_num_this_page;
-                    current_page++;
-                    if(n) base = getPageData<int32_t>(*current_page);
-                    row_num_this_page = std::min((size_t)FULL_INT32_PAGE, n);
-                }while (n>0);
+
+                    n -= end_row-start_row;
+                    if(n<=0) break;
+                }
+
             }
         }, input_column);
     }
@@ -477,52 +460,34 @@ public:
             } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn>) {
                 // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>。
                 const Column* col = std::get<0>(arg);
+                Page *const * current_page = col->pages.data() + std::get<1>(arg);
+                uint32_t offset = probe_matches_[0] + std::get<2>(arg);
 
                 // 支持含null列
-//                assert(col->type==DataType::INT32);
-//                size_t compared = 0;
-//
-//                for(size_t i=std::get<1>(arg); i<col->pages.size(); i++){
-//                    const Page* current_page = col->pages[i];                       // 要读取的页面
-//                    const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
-//                    size_t start_row = i==std::get<1>(arg) ? std::get<2>(arg) : 0;  // 本页的起始行
-//                    size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
-//                    const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
-//
-//                    for (size_t j=start_row; j<end_row; j++, compared++) {
-//                        if(!isNotNull(bitmap, j)){  // 空值不匹配
-//                            continue;
-//                        }
-//                        int32_t right_key=*base;
-//                        base++;
-//
-//                        int32_t left_key = *(int32_t*)((uint8_t*)build_matches_[compared] + key_offset);
-//                        if(left_key == right_key){
-//                            build_matches_[found] = build_matches_[compared];
-//                            probe_matches_[found] = probe_matches_[compared];
-//                            found++;
-//                        }
-//                    }
-//
-//                    n -= end_row-start_row;
-//                    if(n<=0) break;
-//                }
-
-                // 不支持含null列
-                uint32_t start_page = std::get<1>(arg);
-                uint32_t start_row = std::get<2>(arg);
                 assert(col->type==DataType::INT32);
+                for(uint32_t i=0; i<n; i++){
+                    // 定位到probe_matches_[i]所在的Page，和页内偏移
+                    while(offset >= getRowCount(*current_page)){
+                        offset -= getRowCount(*current_page);
+                        current_page++;
+                    }
+                    const uint8_t* bitmap = getBitmap(*current_page);
 
-                for (uint32_t i = 0; i < n; i++) {
+                    // 取出数据，进行比较
+                    if(!isNotNull(bitmap, offset)){
+                        offset += probe_matches_[i+1] - probe_matches_[i];
+                        continue;
+                    }
+                    const int32_t* data_ptr = getPageData<int32_t>(*current_page) + getNonNullCount(bitmap, offset);
+                    int32_t right_key = *data_ptr;
                     int32_t left_key = *(int32_t*)((uint8_t*)build_matches_[i] + key_offset);
-                    uint32_t current_page = (probe_matches_[i] + start_row) / FULL_INT32_PAGE + start_page;
-                    uint32_t current_row = (probe_matches_[i] + start_row) % FULL_INT32_PAGE;
-                    int32_t right_key = *(getPageData<int32_t>(col->pages[current_page])+current_row);
                     if(left_key == right_key){
                         build_matches_[found] = build_matches_[i];
                         probe_matches_[found] = probe_matches_[i];
                         found++;
                     }
+
+                    offset += probe_matches_[i+1] - probe_matches_[i];
                 }
             }
         }, right_col);

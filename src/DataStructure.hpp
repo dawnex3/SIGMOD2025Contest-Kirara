@@ -378,7 +378,7 @@ void gatherContinuousColWithIndex(OperatorResultTable::ContinuousColumn input_co
     uint32_t offset = idx[0] + std::get<2>(input_column);
     if(col->type==DataType::INT32) {
         for(uint32_t i=0; i<n; i++){
-            // 定位到probe_matches_[i]所在的Page，和页内偏移
+            // 定位到idx[i]所在的Page，和页内偏移
             while(offset >= getRowCount(*current_page)){
                 offset -= getRowCount(*current_page);
                 current_page++;
@@ -398,7 +398,7 @@ void gatherContinuousColWithIndex(OperatorResultTable::ContinuousColumn input_co
         }
     } else if(col->type==DataType::VARCHAR){
         for(uint32_t i=0; i<n; i++){
-            // 定位到probe_matches_[i]所在的Page，和页内偏移
+            // 定位到idx[i]所在的Page，和页内偏移
             while(offset >= getStringCount(*current_page)){
                 offset -= getStringCount(*current_page);
                 current_page++;
