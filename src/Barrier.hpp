@@ -48,9 +48,10 @@ public:
             global_profiler->event_begin("barrier wait");
             while (round_.load(std::memory_order_acquire) == my_round) {
                 // 使用 PAUSE 指令降低功耗，避免忙等待过于激烈
-                asm("pause");
-                asm("pause");
-                asm("pause");
+                std::this_thread::yield();
+//                asm("pause");
+//                asm("pause");
+//                asm("pause");
             }
             global_profiler->event_end("barrier wait");
             return false;

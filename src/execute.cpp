@@ -382,7 +382,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     delete global_profiler;
     global_profiler = nullptr;
 
-    std::this_thread::sleep_for(std::chrono::seconds(1));   // 让cpu休息一下吧 :)
+    std::this_thread::sleep_for(std::chrono::seconds(2));   // 让cpu休息一下吧 :)
     return result;
 }
 
