@@ -242,6 +242,7 @@ std::unique_ptr<Operator> getOperator(const Plan& plan, size_t node_idx, SharedS
 // 将原来的计划，翻译为物理执行计划树，返回树的根节点
 std::unique_ptr<ResultWriter> getPlan(const Plan& plan, SharedStateManager& shared_manager, size_t vector_size = 1024){
     // 从plan的根节点进入，递归创建Operator
+    ProfileGuard profile_guard(global_profiler, "make plan");
     std::unique_ptr<Operator> op = getOperator(plan, plan.root, shared_manager, vector_size);
     // ResultWriter算子的共享状态id设为0，其余算子的共享状态id设为其在plan.nodes中的id+1
     auto& shared = shared_manager.get<ResultWriter::Shared>(0,plan.nodes[plan.root].output_attrs);
@@ -265,8 +266,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
         if (i == thread_num - 1) {
             [&plan, &shared_manager, &result, &barriers, barrier_group, i]() {
                 global_profiler->set_thread_id(i);
-                global_profiler->event_begin("execute");
-                auto start = high_resolution_clock::now();
+                ProfileGuard profile_guard(global_profiler, "execute");
                 // 确定当前线程的Barrier
                 current_barrier = barriers[barrier_group];
                 // 每个线程生成各自的执行计划
@@ -277,14 +277,11 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
                 bool is_last = current_barrier->wait();
                 // 由最后一个线程转移结果
                 if (is_last) result = std::move(result_writer->shared_.output_);
-                auto end = high_resolution_clock::now();
-                global_profiler->event_end("execute");
             }();
         } else {
             threads.emplace_back(        [&plan, &shared_manager, &result, &barriers, barrier_group, i]() {
                 global_profiler->set_thread_id(i);
-                global_profiler->event_begin("execute");
-                auto start = high_resolution_clock::now();
+                ProfileGuard profile_guard(global_profiler, "execute");
                 // 确定当前线程的Barrier
                 current_barrier = barriers[barrier_group];
                 // 每个线程生成各自的执行计划
@@ -295,8 +292,6 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
                 bool is_last = current_barrier->wait();
                 // 由最后一个线程转移结果
                 if (is_last) result = std::move(result_writer->shared_.output_);
-                auto end = high_resolution_clock::now();
-                global_profiler->event_end("execute");
             });
         }   
     }
