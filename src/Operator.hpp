@@ -19,6 +19,7 @@
 #include "HashMap.hpp"
 #include "Barrier.hpp"
 #include "DataStructure.hpp"
+#include "MemoryPool.hpp"
 
 namespace Contest {
 //#define DEBUG_LOG
@@ -160,13 +161,13 @@ private:
 
     uint32_t vec_size_;        // 批次大小
 
-    std::unique_ptr<Operator> left_;     // 左侧算子（构建侧）
+    Operator *left_;     // 左侧算子（构建侧）
     size_t left_idx_;                    // 左侧键所在的列号
-    std::unique_ptr<Operator> right_;    // 右侧算子（探测侧）
+    Operator *right_;    // 右侧算子（探测侧）
     size_t right_idx_;                   // 右侧键所在的列号
 
     size_t ht_entry_size_;  // 哈希表一行的大小。哈希表的一行由一个EntryHeader，加上其余要输出的构建侧列组成
-    std::vector<size_t> build_value_offsets_;   // 构建侧每列相对于EntryHeader的偏移量
+    LocalVector<size_t> build_value_offsets_;   // 构建侧每列相对于EntryHeader的偏移量
 
     bool is_build_{false};      // 指示哈希表是否已经构建完毕
 
@@ -176,9 +177,9 @@ private:
     uint32_t * probe_matches_;              // 构建侧匹配的行的行号
 
     OperatorResultTable last_result_;       // 上一次调用next的返回结果。本次调用修改一些参数就可以返回。
-    std::vector<size_t> output_attrs_;      // 需要输出哪些列
+    LocalVector<size_t> output_attrs_;      // 需要输出哪些列
 
-    std::vector<std::pair<uint8_t*, size_t>> allocations_;  // 存储多个哈希表条目数组<数组指针，数组大小>
+    LocalVector<std::pair<uint8_t*, size_t>> allocations_;  // 存储多个哈希表条目数组<数组指针，数组大小>
 
 
     // 专门用于joinSelParallel的循环队列
@@ -193,11 +194,11 @@ private:
 
 public:
 
-    Hashjoin(Shared& shared, size_t vec_size, std::unique_ptr<Operator> left, size_t left_idx,
-        std::unique_ptr<Operator> right, size_t right_idx,
+    Hashjoin(Shared& shared, size_t vec_size, Operator *left, size_t left_idx,
+        Operator *right, size_t right_idx,
         const std::vector<std::tuple<size_t, DataType>>& output_attrs, std::vector<std::tuple<size_t, DataType>> left_attrs)
-    : shared_(shared), vec_size_(vec_size), left_(std::move(left)), left_idx_(left_idx),
-    right_(std::move(right)), right_idx_(right_idx){
+    : shared_(shared), vec_size_(vec_size), left_(left), left_idx_(left_idx),
+    right_(right), right_idx_(right_idx){
         // 计算ht_entry_size_和build_value_offsets_
         // 为了满足对齐的需求，并且让整个entry最小，需要对左表的列顺序重新排列，将int32_t放到前面，uint64_t放到后面
         build_value_offsets_.resize(left_attrs.size());
@@ -218,46 +219,30 @@ public:
         }
 
         // 分配缓冲区的内存
-        probe_hashes_ = (Hashmap::hash_t*)malloc(vec_size_*sizeof(Hashmap::hash_t));
-        build_matches_ = (Hashmap::EntryHeader**)malloc(vec_size_*sizeof(Hashmap::EntryHeader*));
-        probe_matches_ = (uint32_t*)malloc((vec_size_+1)*sizeof(uint32_t));
+        probe_hashes_ = (Hashmap::hash_t*)local_allocator.allocate(vec_size_*sizeof(Hashmap::hash_t));
+        build_matches_ = (Hashmap::EntryHeader**)local_allocator.allocate(vec_size_*sizeof(Hashmap::EntryHeader*));
+        probe_matches_ = (uint32_t*)local_allocator.allocate((vec_size_+1)*sizeof(uint32_t));
 
         // 分配结果表last_result_的内存，设置output_attrs_
         for(auto [col_idx, col_type]:output_attrs){
             output_attrs_.push_back(col_idx);
             if(col_type==DataType::INT32){
-                void* col_buffer = malloc(vec_size*sizeof(int32_t));
+                void* col_buffer = local_allocator.allocate(vec_size*sizeof(int32_t));
                 last_result_.columns_.emplace_back(std::make_pair(col_type, col_buffer));
             } else {
-                void* col_buffer = malloc(vec_size*sizeof(uint64_t));
+                void* col_buffer = local_allocator.allocate(vec_size*sizeof(uint64_t));
                 last_result_.columns_.emplace_back(std::make_pair(col_type, col_buffer));
             }
         }
 
         // 分配循环队列的内存
-        queue_probe_ = (uint32_t*)malloc(circular_queue_size_*sizeof(uint32_t));
-        queue_build_ = (Hashmap::EntryHeader**)malloc(circular_queue_size_*sizeof(Hashmap::EntryHeader*));
+        queue_probe_ = (uint32_t*)local_allocator.allocate(circular_queue_size_*sizeof(uint32_t));
+        queue_build_ = (Hashmap::EntryHeader**)local_allocator.allocate(circular_queue_size_*sizeof(Hashmap::EntryHeader*));
     }
 
     ~Hashjoin() override{
-        // 销毁缓冲区，以及last_result_
-        free(probe_hashes_);
-        free(build_matches_);
-        free(probe_matches_);
-        for(auto column_var:last_result_.columns_){
-            auto column = std::get<OperatorResultTable::InstantiatedColumn>(column_var);
-            free(column.second);
-        }
-
-        // 销毁哈希表
-        for(auto [entrys,_]:allocations_){
-            free(entrys);
-        }
-
-        // 销毁循环队列
-        free(queue_probe_);
-        free(queue_build_);
     }
+    
     size_t resultColumnNum() override{
         return last_result_.columns_.size();
     }
@@ -278,7 +263,7 @@ public:
                 found += n;
 
                 // 申请一块n*ht_entry_size_大小的内存，存放本批次的哈希表条目
-                uint8_t *ht_entrys = (uint8_t*)malloc(n * ht_entry_size_);
+                uint8_t *ht_entrys = (uint8_t*)local_allocator.allocate(n * ht_entry_size_);
                 allocations_.emplace_back(ht_entrys, n);
 
                 // 从数据源OperatorResultTable取出键值，计算键的哈希值并存储到EntryHeader当中。键本身也要存储到EntryHeader。
@@ -657,20 +642,20 @@ public:
 
     Shared& shared_;
 
-    std::unique_ptr<Operator> child_;   // 子算子。一般来说是个JOIN
+    Operator *child_;   // 子算子。一般来说是个JOIN
 
-    std::vector<std::vector<Page*>> page_buffers_;   // 暂时存储的每一列的page
-    std::vector<std::unique_ptr<TempPage>> unfilled_page_;   // 未满的 Page
+    LocalVector<LocalVector<Page*>> page_buffers_;   // 暂时存储的每一列的page
+    LocalVector<TempPage *> unfilled_page_;   // 未满的 Page
 
-    ResultWriter(Shared &shared, std::unique_ptr<Operator> child)
+    ResultWriter(Shared &shared, Operator *child)
         : shared_{shared}, page_buffers_(shared.output_.columns.size()),
-          child_(std::move(child)),
+          child_(child),
           unfilled_page_() {
             for (size_t i = 0; i < shared.output_.columns.size(); ++i) {
                 if (shared.output_.columns[i].type == DataType::INT32) {
-                    unfilled_page_.emplace_back(std::make_unique<TempIntPage>());
+                    unfilled_page_.push_back(new (local_allocator.allocate(sizeof (TempIntPage))) TempIntPage);
                 } else if (shared.output_.columns[i].type == DataType::VARCHAR) {
-                    unfilled_page_.emplace_back(std::make_unique<TempStringPage>());
+                    unfilled_page_.push_back(new (local_allocator.allocate(sizeof (TempStringPage))) TempStringPage);
                 } else {
                     throw std::runtime_error("Unsupported data type");
                 }
@@ -691,10 +676,10 @@ public:
             for(size_t i=0; i<child_result.columns_.size(); i++){
                 auto from_column = std::get<OperatorResultTable::InstantiatedColumn>(child_result.columns_[i]);
                 auto rows = child_result.num_rows_; 
-                std::vector<Page*>& pages = page_buffers_[i];
+                LocalVector<Page*>& pages = page_buffers_[i];
 
                 if(from_column.first==DataType::INT32){
-                    TempIntPage *temp = (TempIntPage *)unfilled_page_[i].get();
+                    TempIntPage *temp = (TempIntPage *)unfilled_page_[i];
                     int32_t *form_data = (int32_t*)from_column.second;
 
                     for (size_t j = 0; j < rows; ++j) {
@@ -705,7 +690,7 @@ public:
                     }
                     continue;
                 } else if (from_column.first==DataType::VARCHAR){
-                    TempStringPage *temp = (TempStringPage *)unfilled_page_[i].get();
+                    TempStringPage *temp = (TempStringPage *)unfilled_page_[i];
                     varchar_ptr *from_data = (varchar_ptr *)from_column.second;
 
                     for (int j = 0; j < rows; ++j) {
@@ -738,7 +723,7 @@ public:
         }
 
         for (int i = 0; i < shared_.output_.columns.size(); ++i) {
-            auto temp = unfilled_page_[i].get();
+            auto temp = unfilled_page_[i];
             if (!temp->is_empty()) {
                 page_buffers_[i].emplace_back(temp->dump_page());
             }

@@ -3,6 +3,7 @@
 #include "plan.h"
 #include "iostream"
 #include "sstream"
+#include "MemoryPool.hpp"
 
 namespace Contest {
 #define FULL_INT32_PAGE (1984)
@@ -48,8 +49,8 @@ struct varchar_ptr {
 };
 
 // 一些辅助处理Page信息的函数
-
-void set_bitmap(std::vector<uint8_t>& bitmap, uint16_t idx) {
+template<typename Alloc>
+void set_bitmap(std::vector<uint8_t, Alloc>& bitmap, uint16_t idx) {
     while (bitmap.size() < idx / 8 + 1) {
         bitmap.emplace_back(0);
     }
@@ -58,7 +59,8 @@ void set_bitmap(std::vector<uint8_t>& bitmap, uint16_t idx) {
     bitmap[byte_idx] |= (1u << bit);
 }
 
-void unset_bitmap(std::vector<uint8_t>& bitmap, uint16_t idx) {
+template<typename Alloc>
+void unset_bitmap(std::vector<uint8_t, Alloc>& bitmap, uint16_t idx) {
     while (bitmap.size() < idx / 8 + 1) {
         bitmap.emplace_back(0);
     }
@@ -76,7 +78,7 @@ public:
 
 class TempIntPage : public TempPage {
 private:
-    std::vector<uint8_t> bitmap;
+    LocalVector<uint8_t> bitmap;
     Page *page = nullptr;
     void alloc_page() {
 #ifdef PROFILER
@@ -147,9 +149,9 @@ public:
 class TempStringPage : public TempPage {
 private:
     uint16_t              num_rows = 0;
-    std::vector<char>     data;
-    std::vector<uint16_t> offsets;
-    std::vector<uint8_t>  bitmap;
+    LocalVector<char>     data;
+    LocalVector<uint16_t> offsets;
+    LocalVector<uint8_t>  bitmap;
 
 public:
     TempStringPage() {
@@ -235,7 +237,7 @@ public:
     using ColumnVariant = std::variant<InstantiatedColumn, ContinuousColumn>;
 
     // 存储所有列的变体集合
-    std::vector<ColumnVariant> columns_;
+    LocalVector<ColumnVariant> columns_;
 
     inline bool isEmpty() const { return num_rows_ == 0; }
 

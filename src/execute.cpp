@@ -3,6 +3,7 @@
 #include <plan.h>
 #include <table.h>
 #include <thread>
+#include "MemoryPool.hpp"
 #include "Profiler.hpp"
 #include "SharedState.hpp"
 #include "Operator.hpp"
@@ -221,21 +222,21 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
         node.data);
 }
 
-std::unique_ptr<Operator> getOperator(const Plan& plan, size_t node_idx, SharedStateManager& shared_manager, size_t vector_size = 1024){
+Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& shared_manager, size_t vector_size = 1024){
     auto& node = plan.nodes[node_idx];
     return std::visit(
-        [&](const auto& value)-> std::unique_ptr<Operator> {
+        [&](const auto& value)-> Operator *{
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
                 // 如果是join节点
                 auto& shared = shared_manager.get<Hashjoin::Shared>(node_idx + 1); //共享状态id设为node_idx+1
-                std::unique_ptr<Operator> left_op = getOperator(plan, value.left, shared_manager, vector_size);
-                std::unique_ptr<Operator> right_op = getOperator(plan, value.right, shared_manager, vector_size);
+                Operator *left_op = getOperator(plan, value.left, shared_manager, vector_size);
+                Operator *right_op = getOperator(plan, value.right, shared_manager, vector_size);
                 if(value.build_left){   // 左侧构建，正常情况
-                    std::unique_ptr<Hashjoin> hash_join = std::make_unique<Hashjoin>(
-                        shared, vector_size, std::move(left_op), value.left_attr,
-                        std::move(right_op), value.right_attr, node.output_attrs, plan.nodes[value.left].output_attrs);
-                    return std::move(hash_join);
+                    Operator *hash_join = new (local_allocator.allocate(sizeof(Hashjoin))) Hashjoin(
+                        shared, vector_size, left_op, value.left_attr,
+                        right_op, value.right_attr, node.output_attrs, plan.nodes[value.left].output_attrs);
+                    return hash_join;
                 } else {    // 右侧构建，调换算子顺序，以及output_attrs的顺序
                     std::vector<std::tuple<size_t, DataType>> output_attrs;
                     size_t left_size = plan.nodes[value.left].output_attrs.size();
@@ -243,10 +244,10 @@ std::unique_ptr<Operator> getOperator(const Plan& plan, size_t node_idx, SharedS
                     for(auto [col_idx, col_type]: node.output_attrs){
                         output_attrs.emplace_back(col_idx>=left_size ? col_idx-left_size : col_idx+right_size, col_type);
                     }
-                    std::unique_ptr<Hashjoin> hash_join = std::make_unique<Hashjoin>(
-                        shared, vector_size, std::move(right_op), value.right_attr,
-                        std::move(left_op), value.left_attr, output_attrs, plan.nodes[value.right].output_attrs);
-                    return std::move(hash_join);
+                    Hashjoin *hash_join = new (local_allocator.allocate(sizeof(Hashjoin))) Hashjoin(
+                        shared, vector_size, right_op, value.right_attr,
+                        left_op, value.left_attr, output_attrs, plan.nodes[value.right].output_attrs);
+                    return hash_join;
                 }
             } else if constexpr (std::is_same_v<T, ScanNode>){
                 // 如果是scan节点
@@ -258,23 +259,23 @@ std::unique_ptr<Operator> getOperator(const Plan& plan, size_t node_idx, SharedS
                 for(auto [col_idx, _]: node.output_attrs){
                     columns.push_back(&table.columns[col_idx]);
                 }
-                std::unique_ptr<Scan> scan = std::make_unique<Scan>(shared,row_num,vector_size,columns);
+                Scan *scan = new (local_allocator.allocate(sizeof(Scan))) Scan(shared,row_num,vector_size,columns);
 
-                return std::move(scan);
+                return scan;
             }
         },
         node.data);
 }
 
 // 将原来的计划，翻译为物理执行计划树，返回树的根节点
-std::unique_ptr<ResultWriter> getPlan(const Plan& plan, SharedStateManager& shared_manager, size_t vector_size = 1024){
+ResultWriter *getPlan(const Plan& plan, SharedStateManager& shared_manager, size_t vector_size = 1024){
     // 从plan的根节点进入，递归创建Operator
     ProfileGuard profile_guard(global_profiler, "make plan");
-    std::unique_ptr<Operator> op = getOperator(plan, plan.root, shared_manager, vector_size);
+    Operator *op = getOperator(plan, plan.root, shared_manager, vector_size);
     // ResultWriter算子的共享状态id设为0，其余算子的共享状态id设为其在plan.nodes中的id+1
     auto& shared = shared_manager.get<ResultWriter::Shared>(0,plan.nodes[plan.root].output_attrs);
-    std::unique_ptr<ResultWriter> result_writer = std::make_unique<ResultWriter>(shared,std::move(op));
-    return std::move(result_writer);
+    ResultWriter *result_writer = new (local_allocator.allocate(sizeof(ResultWriter))) ResultWriter(shared, op);
+    return result_writer;
 }
 
 void test_hash(){
@@ -325,6 +326,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     SharedStateManager shared_manager;                  // 创建共享状态
     ColumnarTable result;                               // 执行结果
     global_profiler = new Profiler(thread_num);
+    global_mempool.reset();
 
     // 启动所有线程
     for (int i = 0; i < thread_num; ++i) {
@@ -332,12 +334,13 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 
         if (i == thread_num - 1) {
             [&plan, &shared_manager, &result, &barriers, barrier_group, i]() {
+                local_allocator.reuse();
                 global_profiler->set_thread_id(i);
                 ProfileGuard profile_guard(global_profiler, "execute");
                 // 确定当前线程的Barrier
                 current_barrier = barriers[barrier_group];
                 // 每个线程生成各自的执行计划
-                std::unique_ptr<ResultWriter> result_writer = getPlan(plan,shared_manager,vector_size);
+                ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size);
                 // 执行计划
                 result_writer->next();
                 // 等待所有线程完成
@@ -347,12 +350,13 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
             }();
         } else {
             threads.emplace_back(        [&plan, &shared_manager, &result, &barriers, barrier_group, i]() {
+                local_allocator.reuse();
                 global_profiler->set_thread_id(i);
                 ProfileGuard profile_guard(global_profiler, "execute");
                 // 确定当前线程的Barrier
                 current_barrier = barriers[barrier_group];
                 // 每个线程生成各自的执行计划
-                std::unique_ptr<ResultWriter> result_writer = getPlan(plan,shared_manager,vector_size);
+                ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size);
                 // 执行计划
                 result_writer->next();
                 // 等待所有线程完成
@@ -376,8 +380,10 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     global_profiler->print_profiles();
     delete global_profiler;
     global_profiler = nullptr;
+    // delete global_mempool;
+    // global_mempool = nullptr;
 
-    std::this_thread::sleep_for(std::chrono::seconds(2));   // 让cpu休息一下吧 :)
+    // std::this_thread::sleep_for(std::chrono::seconds(2));   // 让cpu休息一下吧 :)
     return result;
 }
 

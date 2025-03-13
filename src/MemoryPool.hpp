@@ -1,3 +1,185 @@
-namespace Contest {
+#pragma once
+#include <stdexcept>
+#include <sys/mman.h>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+#include <sys/types.h>
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <new>
+#include <vector>
 
+#define DEBUG_ALLOC 0
+
+
+namespace mem {
+inline void* malloc_huge(size_t size) {
+   void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#ifdef __linux__
+   madvise(p, size, MADV_HUGEPAGE);
+#endif
+   // memset(p, 0, size);
+   return p;
 }
+
+inline void free_huge(void* p, size_t size) {
+   auto r = munmap(p, size);
+   if (r) throw std::runtime_error("Memory unmapping failed.");
+}
+} // namespace mem
+
+
+
+class GlobalPool {
+private:
+  int8_t *start_ = nullptr;
+  int8_t *end_ = nullptr;
+  std::atomic<int8_t *> next_ = nullptr;
+
+  size_t pool_size_ = (size_t)32 * 1024 * 1024 * 1024;
+
+  int8_t *newChunk(size_t size);
+  int8_t *newChunkWithInit(size_t size);
+
+public:
+  GlobalPool();
+  ~GlobalPool();
+  GlobalPool(GlobalPool &&) = delete;
+  GlobalPool(const GlobalPool &) = delete;
+
+  void *allocate(size_t size);
+  void reset();
+} global_mempool;
+
+inline GlobalPool::GlobalPool() {
+  start_ = newChunkWithInit(pool_size_);
+  end_ = start_ + pool_size_;
+  next_ = start_;
+}
+
+inline GlobalPool::~GlobalPool() {
+  mem::free_huge(start_, pool_size_);
+  start_ = nullptr;
+  end_ = nullptr;
+  next_ = nullptr;
+}
+
+inline int8_t *GlobalPool::newChunk(size_t size) {
+  return (int8_t *)mem::malloc_huge(size);
+}
+
+inline int8_t *GlobalPool::newChunkWithInit(size_t size) {
+  void *ptr = mem::malloc_huge(size);
+  memset(ptr, 0xbe, size);
+  return (int8_t *)ptr;
+}
+
+inline void *GlobalPool::allocate(size_t size) {
+  int8_t *tmp = nullptr;
+  int8_t *alloc = nullptr;
+
+  do {
+    tmp = next_.load();
+    if (tmp + size >= end_) {
+      throw std::bad_alloc();
+    }
+    alloc = tmp;
+  } while (!next_.compare_exchange_weak(tmp, tmp + size));
+
+  return alloc;
+}
+
+inline void GlobalPool::reset() {
+  next_ = start_;
+}
+
+
+
+thread_local class Allocator {
+private:
+  // start with a huge page
+  size_t init_alloc_ = 64 * 1024 * 1024;
+  size_t min_alloc_ = 1 * 1024 * 1024;
+  uint8_t *start_ = nullptr;
+  size_t free_ = 0;
+  GlobalPool *memory_source_ = nullptr;
+
+public:
+  Allocator() { setSource(&global_mempool); }
+  Allocator(Allocator &&) = default;
+  Allocator(const Allocator &) = delete;
+  GlobalPool *setSource(GlobalPool *s);
+  inline void *allocate(size_t size);
+  void reuse();
+} local_allocator;
+
+inline void *Allocator::allocate(size_t size) {
+#if DEBUG_ALLOC
+  return malloc(size);
+#else
+  auto aligndiff = 64 - ((uintptr_t)start_ % 64);
+  size += aligndiff;
+  if (free_ < size) {
+    size_t alloc_size = std::max(min_alloc_, size + 64);
+    start_ = (uint8_t *)memory_source_->allocate(alloc_size);
+
+    aligndiff = 64 - ((uintptr_t)start_ % 64);
+    size += aligndiff;
+    free_ = alloc_size;
+  }
+  auto alloc = start_ + aligndiff;
+  start_ += size;
+  free_ -= size;
+  return alloc;
+#endif
+}
+
+inline GlobalPool *Allocator::setSource(GlobalPool *source) {
+  auto previousSource = memory_source_;
+  memory_source_ = source;
+  if (source) {
+    start_ = (uint8_t *)memory_source_->allocate(init_alloc_);
+    free_ = init_alloc_;
+  }
+  return previousSource;
+}
+
+inline void Allocator::reuse() {
+  start_ = (uint8_t *)memory_source_->allocate(init_alloc_);
+  free_ = init_alloc_;
+}
+
+template <typename T>
+class LocalAllocatorWrapper {
+public:
+  using value_type = T;
+
+  LocalAllocatorWrapper() = default;
+
+  template <typename U> LocalAllocatorWrapper(const LocalAllocatorWrapper<U> &) noexcept {}
+
+  T *allocate(std::size_t n) {
+    return static_cast<T *>(local_allocator.allocate(n * sizeof(T)));
+  }
+
+  void deallocate(T *p, std::size_t n) noexcept {
+    // donothing ...
+  }
+
+  template <typename U, typename... Args> void construct(U *p, Args &&...args) {
+    new (p) U(std::forward<Args>(args)...);
+  }
+
+  template <typename U> void destroy(U *p) { p->~U(); }
+};
+
+template <typename T>
+using LocalVector = std::vector<T, LocalAllocatorWrapper<T>>;
