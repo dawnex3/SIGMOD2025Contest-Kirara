@@ -6,18 +6,15 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <new>
 #include <sys/types.h>
-#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <new>
 #include <vector>
+#include <mutex>
 
-#define DEBUG_ALLOC 0
-
+#define NO_USE_MEMPOOL 1
 
 namespace mem {
 inline void* malloc_huge(size_t size) {
@@ -49,6 +46,12 @@ private:
   int8_t *newChunk(size_t size);
   int8_t *newChunkWithInit(size_t size);
 
+#ifdef NO_USE_MEMPOOL
+  std::vector<void *> allocated_;
+  size_t allocated_size_;
+  std::mutex mtx_;
+#endif
+
 public:
   GlobalPool();
   ~GlobalPool();
@@ -60,16 +63,25 @@ public:
 } global_mempool;
 
 inline GlobalPool::GlobalPool() {
+#ifndef NO_USE_MEMPOOL
   start_ = newChunkWithInit(pool_size_);
   end_ = start_ + pool_size_;
   next_ = start_;
+#endif
 }
 
 inline GlobalPool::~GlobalPool() {
+#ifndef NO_USE_MEMPOOL
   mem::free_huge(start_, pool_size_);
   start_ = nullptr;
   end_ = nullptr;
   next_ = nullptr;
+#else
+  for (void *alloc : allocated_) {
+    std::free(alloc);
+  }
+  allocated_.clear();
+#endif
 }
 
 inline int8_t *GlobalPool::newChunk(size_t size) {
@@ -83,6 +95,7 @@ inline int8_t *GlobalPool::newChunkWithInit(size_t size) {
 }
 
 inline void *GlobalPool::allocate(size_t size) {
+#ifndef NO_USE_MEMPOOL
   int8_t *tmp = nullptr;
   int8_t *alloc = nullptr;
 
@@ -95,10 +108,26 @@ inline void *GlobalPool::allocate(size_t size) {
   } while (!next_.compare_exchange_weak(tmp, tmp + size));
 
   return alloc;
+#else
+  std::lock_guard lock(mtx_);
+  void *ptr = malloc(size);
+  allocated_.push_back(ptr);
+  allocated_size_ += size;
+  return ptr;
+#endif
 }
 
 inline void GlobalPool::reset() {
+#ifndef NO_USE_MEMPOOL
   next_ = start_;
+#else
+  for (void *alloc : allocated_) {
+    std::free(alloc);
+  }
+  allocated_.clear();
+  fmt::println("sql use memory: {}", allocated_size_);
+  allocated_size_ = 0;
+#endif
 }
 
 
@@ -106,7 +135,11 @@ inline void GlobalPool::reset() {
 thread_local class Allocator {
 private:
   // start with a huge page
+#ifndef NO_USE_MEMPOOL
   size_t init_alloc_ = 64 * 1024 * 1024;
+#else
+  size_t init_alloc_ = 1 * 1024 * 1024;
+#endif
   size_t min_alloc_ = 1 * 1024 * 1024;
   uint8_t *start_ = nullptr;
   size_t free_ = 0;
@@ -122,9 +155,6 @@ public:
 } local_allocator;
 
 inline void *Allocator::allocate(size_t size) {
-#if DEBUG_ALLOC
-  return malloc(size);
-#else
   auto aligndiff = 64 - ((uintptr_t)start_ % 64);
   size += aligndiff;
   if (free_ < size) {
@@ -139,7 +169,6 @@ inline void *Allocator::allocate(size_t size) {
   start_ += size;
   free_ -= size;
   return alloc;
-#endif
 }
 
 inline GlobalPool *Allocator::setSource(GlobalPool *source) {
