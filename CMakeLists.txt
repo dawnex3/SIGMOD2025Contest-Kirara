@@ -78,6 +78,14 @@ file(GLOB SIGMODPC_SRC
     "src/*.cpp"
 )
 
+# Enable server-specific compiler optimizations.
+# Use march=native for all but Power servers, which results in the following error:
+#    clang++-18: error: unsupported option '-march=' for target 'powerpc64le-unknown-linux-gnu'
+# This flag works on other Power systems, but for now, we disable march=native on all Power machines.
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
+    add_compile_options(-march=native)
+endif()
+
 add_executable(
     run
 
@@ -89,14 +97,6 @@ target_include_directories(run PRIVATE include)
 target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(run PRIVATE _CRT_SECURE_NO_WARNINGS)
-endif()
-
-# Enable server-specific compiler optimizations.
-# Use march=native for all but Power servers, which results in the following error:
-#    clang++-18: error: unsupported option '-march=' for target 'powerpc64le-unknown-linux-gnu'
-# This flag works on other Power systems, but for now, we disable march=native on all Power machines.
-if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
-    add_compile_options(-march=native)
 endif()
 
 add_executable(
