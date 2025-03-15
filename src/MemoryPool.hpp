@@ -14,7 +14,7 @@
 #include <vector>
 #include <mutex>
 
-#define NO_USE_MEMPOOL 1
+// #define NO_USE_MEMPOOL 
 
 namespace mem {
 inline void* malloc_huge(size_t size) {
@@ -41,7 +41,7 @@ private:
   int8_t *end_ = nullptr;
   std::atomic<int8_t *> next_ = nullptr;
 
-  size_t pool_size_ = (size_t)32 * 1024 * 1024 * 1024;
+  size_t pool_size_ = (size_t)16 * 1024 * 1024 * 1024;
 
   int8_t *newChunk(size_t size);
   int8_t *newChunkWithInit(size_t size);
