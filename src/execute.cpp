@@ -1,6 +1,6 @@
 #include <algorithm>
 #include <chrono>
-//#include <hardware.h>
+#include <hardware.h>
 #include <plan.h>
 #include <table.h>
 #include <thread>
@@ -317,8 +317,8 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 //                   | ranges::to<std::vector<DataType>>();
 //    Table table{std::move(ret), std::move(ret_types)};
 //    return table.to_columnar();
-
-    const int thread_num = 24;                          // 线程数（包括主线程）
+//    printf("nodes = %ld\n", plan.nodes.size());
+    const int thread_num = std::min(64, std::max(SPC__THREAD_COUNT / 4 * 3, 24));   // 线程数（包括主线程）
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
     std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
@@ -338,7 +338,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
                 // 确定当前线程的Barrier
                 current_barrier = barriers[barrier_group];
                 // 每个线程生成各自的执行计划
-                std::unique_ptr<ResultWriter> result_writer = getPlan(plan,shared_manager,vector_size);
+                std::unique_ptr<ResultWriter> result_writer = getPlan(plan,shared_manager, vector_size);
                 // 执行计划
                 result_writer->next();
                 // 等待所有线程完成
