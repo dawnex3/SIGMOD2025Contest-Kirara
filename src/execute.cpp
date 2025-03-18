@@ -1,18 +1,10 @@
-#include <algorithm>
-#include <chrono>
+#include <hardware.h>
 #include <plan.h>
 #include <table.h>
-#include <thread>
-#include "Profiler.hpp"
-#include "SharedState.hpp"
-#include "Operator.hpp"
-#include "Barrier.hpp"
 
 namespace Contest {
 
-
 using ExecuteResult = std::vector<std::vector<Data>>;
-using namespace std::chrono;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
@@ -23,7 +15,6 @@ struct JoinAlgorithm {
     ExecuteResult&                                   results;
     size_t                                           left_col, right_col;
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
-    size_t                                           node_idx;
 
     template <class T>
     auto run() {
@@ -123,16 +114,15 @@ struct JoinAlgorithm {
 
 ExecuteResult execute_hash_join(const Plan&          plan,
     const JoinNode&                                  join,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
-    size_t node_idx) {
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
     auto                           left_idx    = join.left;
     auto                           right_idx   = join.right;
     auto&                          left_node   = plan.nodes[left_idx];
     auto&                          right_node  = plan.nodes[right_idx];
     auto&                          left_types  = left_node.output_attrs;
     auto&                          right_types = right_node.output_attrs;
-    auto                           right       = execute_impl(plan, right_idx);
     auto                           left        = execute_impl(plan, left_idx);
+    auto                           right       = execute_impl(plan, right_idx);
     std::vector<std::vector<Data>> results;
 
     JoinAlgorithm join_algorithm{.build_left = join.build_left,
@@ -141,8 +131,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         .results                             = results,
         .left_col                            = join.left_attr,
         .right_col                           = join.right_attr,
-        .output_attrs                        = output_attrs,
-        .node_idx                            = node_idx};
+        .output_attrs                        = output_attrs};
     if (join.build_left) {
         switch (std::get<1>(left_types[join.left_attr])) {
         case DataType::INT32:   join_algorithm.run<int32_t>(); break;
@@ -159,39 +148,12 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         }
     }
 
-//    // 打印结果
-//    std::ostringstream oss;
-//    oss << "join "<< node_idx <<" output rows: " << results.size() << ", details:\n";
-//    for (const auto &row : results) {
-//        for (const auto &data : row) {
-//            std::visit([&](auto&& d) {
-//                using T = std::decay_t<decltype(d)>;
-//                if constexpr (std::is_same_v<T, int32_t>) {
-//                    oss << d << "\t\t"; // 输出 int32_t
-//                } else if constexpr (std::is_same_v<T, std::basic_string<char>>) {
-//                    oss << d << "\t\t"; // 输出字符串
-//                } else if constexpr (std::is_same_v<T, std::monostate>) {
-//                    oss << "NULL\t\t";
-//                } else {
-//                    throw std::runtime_error("Unsupported data type");
-//                }
-//            }, data);
-//        }
-//        oss << "\n";
-//    }
-//    oss << "\n";
-//
-//    std::ofstream log("log_true.txt", std::ios::app);
-//    log << oss.str();
-//    log.close();
-
     return results;
 }
 
 ExecuteResult execute_scan(const Plan&               plan,
     const ScanNode&                                  scan,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
-    size_t node_idx) {
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
     auto                           table_id = scan.base_table_id;
     auto&                          input    = plan.inputs[table_id];
     auto                           table    = Table::from_columnar(input);
@@ -213,179 +175,23 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
         [&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
-                return execute_hash_join(plan, value, node.output_attrs,node_idx);
+                return execute_hash_join(plan, value, node.output_attrs);
             } else {
-                return execute_scan(plan, value, node.output_attrs,node_idx);
+                return execute_scan(plan, value, node.output_attrs);
             }
         },
         node.data);
-}
-
-std::unique_ptr<Operator> getOperator(const Plan& plan, size_t node_idx, SharedStateManager& shared_manager, size_t vector_size = 1024){
-    auto& node = plan.nodes[node_idx];
-    return std::visit(
-        [&](const auto& value)-> std::unique_ptr<Operator> {
-            using T = std::decay_t<decltype(value)>;
-            if constexpr (std::is_same_v<T, JoinNode>) {
-                // 如果是join节点
-                auto& shared = shared_manager.get<Hashjoin::Shared>(node_idx + 1); //共享状态id设为node_idx+1
-                std::unique_ptr<Operator> left_op = getOperator(plan, value.left, shared_manager, vector_size);
-                std::unique_ptr<Operator> right_op = getOperator(plan, value.right, shared_manager, vector_size);
-                if(value.build_left){   // 左侧构建，正常情况
-                    std::unique_ptr<Hashjoin> hash_join = std::make_unique<Hashjoin>(
-                        shared, vector_size, std::move(left_op), value.left_attr,
-                        std::move(right_op), value.right_attr, node.output_attrs, plan.nodes[value.left].output_attrs);
-                    return std::move(hash_join);
-                } else {    // 右侧构建，调换算子顺序，以及output_attrs的顺序
-                    std::vector<std::tuple<size_t, DataType>> output_attrs;
-                    size_t left_size = plan.nodes[value.left].output_attrs.size();
-                    size_t right_size = plan.nodes[value.right].output_attrs.size();
-                    for(auto [col_idx, col_type]: node.output_attrs){
-                        output_attrs.emplace_back(col_idx>=left_size ? col_idx-left_size : col_idx+right_size, col_type);
-                    }
-                    std::unique_ptr<Hashjoin> hash_join = std::make_unique<Hashjoin>(
-                        shared, vector_size, std::move(right_op), value.right_attr,
-                        std::move(left_op), value.left_attr, output_attrs, plan.nodes[value.right].output_attrs);
-                    return std::move(hash_join);
-                }
-            } else if constexpr (std::is_same_v<T, ScanNode>){
-                // 如果是scan节点
-                const ColumnarTable& table = plan.inputs[value.base_table_id];
-                auto& shared = shared_manager.get<Scan::Shared>(node_idx + 1); //共享状态id设为node_idx+1
-                size_t row_num = table.num_rows;
-                // 填充数据源
-                std::vector<const Column*> columns;
-                for(auto [col_idx, _]: node.output_attrs){
-                    columns.push_back(&table.columns[col_idx]);
-                }
-                std::unique_ptr<Scan> scan = std::make_unique<Scan>(shared,row_num,vector_size,columns);
-
-                return std::move(scan);
-            }
-        },
-        node.data);
-}
-
-// 将原来的计划，翻译为物理执行计划树，返回树的根节点
-std::unique_ptr<ResultWriter> getPlan(const Plan& plan, SharedStateManager& shared_manager, size_t vector_size = 1024){
-    // 从plan的根节点进入，递归创建Operator
-    std::unique_ptr<Operator> op = getOperator(plan, plan.root, shared_manager, vector_size);
-    // ResultWriter算子的共享状态id设为0，其余算子的共享状态id设为其在plan.nodes中的id+1
-    auto& shared = shared_manager.get<ResultWriter::Shared>(0,plan.nodes[plan.root].output_attrs);
-    std::unique_ptr<ResultWriter> result_writer = std::make_unique<ResultWriter>(shared,std::move(op));
-    return std::move(result_writer);
-}
-
-void test_hash(){
-    std::vector<uint32_t> hash_to_key((uint32_t)0xFFFFFFFF, 0);
-    std::vector<bool> is_key_repeat((uint32_t)0xFFFFFFFF, false);
-
-    uint32_t h0 = hash_32(0);
-
-    uint32_t key = 0;
-    do {
-        uint32_t h = hash_32(key);
-        if(h==h0){
-            is_key_repeat[key]=true;
-        } else if(hash_to_key[h]==0){
-            hash_to_key[h]=key;
-        } else {
-            is_key_repeat[hash_to_key[h]]=true;
-            is_key_repeat[key]=true;
-        }
-    } while (key++ != 0xFFFFFFFF);
-
-    std::ofstream file("unrepeat_key.txt", std::ios::app);
-    // 从int32的最小值开始，输出不碰撞的key
-    int32_t test_num=10000;
-    int32_t skey=NULL_INT32;
-    for(int32_t i=0; i<test_num;skey++,i++){
-        if(!is_key_repeat[(uint32_t)skey]){
-            file<<skey<<std::endl;
-        }
-    }
-    file.close();
-    exit(1);
 }
 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-//    namespace views = ranges::views;
-//    auto ret        = execute_impl(plan, plan.root);
-//    auto ret_types  = plan.nodes[plan.root].output_attrs
-//                   | views::transform([](const auto& v) { return std::get<1>(v); })
-//                   | ranges::to<std::vector<DataType>>();
-//    Table table{std::move(ret), std::move(ret_types)};
-//    return table.to_columnar();
-
-    const int thread_num = 24;                          // 线程数（包括主线程）
-    const int vector_size = 1024;                       // 向量化的批次大小
-    std::vector<std::thread> threads;                   // 线程池
-    std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
-    SharedStateManager shared_manager;                  // 创建共享状态
-    ColumnarTable result;                               // 执行结果
-    global_profiler = new Profiler(thread_num);
-
-    // 启动所有线程
-    for (int i = 0; i < thread_num; ++i) {
-        int barrier_group = i / Barrier::threads_per_barrier_;    // 每threads_per_barrier_个线程属于一个barrier_group
-
-        if (i == thread_num - 1) {
-            [&plan, &shared_manager, &result, &barriers, barrier_group, i]() {
-                global_profiler->set_thread_id(i);
-                global_profiler->event_begin("execute");
-                auto start = high_resolution_clock::now();
-                // 确定当前线程的Barrier
-                current_barrier = barriers[barrier_group];
-                // 每个线程生成各自的执行计划
-                std::unique_ptr<ResultWriter> result_writer = getPlan(plan,shared_manager,vector_size);
-                // 执行计划
-                result_writer->next();
-                // 等待所有线程完成
-                bool is_last = current_barrier->wait();
-                // 由最后一个线程转移结果
-                if (is_last) result = std::move(result_writer->shared_.output_);
-                auto end = high_resolution_clock::now();
-                global_profiler->event_end("execute");
-            }();
-        } else {
-            threads.emplace_back(        [&plan, &shared_manager, &result, &barriers, barrier_group, i]() {
-                global_profiler->set_thread_id(i);
-                global_profiler->event_begin("execute");
-                auto start = high_resolution_clock::now();
-                // 确定当前线程的Barrier
-                current_barrier = barriers[barrier_group];
-                // 每个线程生成各自的执行计划
-                std::unique_ptr<ResultWriter> result_writer = getPlan(plan,shared_manager,vector_size);
-                // 执行计划
-                result_writer->next();
-                // 等待所有线程完成
-                bool is_last = current_barrier->wait();
-                // 由最后一个线程转移结果
-                if (is_last) result = std::move(result_writer->shared_.output_);
-                auto end = high_resolution_clock::now();
-                global_profiler->event_end("execute");
-            });
-        }   
-    }
-
-    // 等待所有线程结束
-    for (auto& t : threads) {
-        if (t.joinable()) {
-            t.join();
-        }
-    }
-
-    // 销毁屏障
-    Barrier::destroy(barriers);
-
-    global_profiler->print_profiles();
-    delete global_profiler;
-    global_profiler = nullptr;
-
-    std::this_thread::sleep_for(std::chrono::seconds(2));   // 让cpu休息一下吧 :)
-    return result;
+    namespace views = ranges::views;
+    auto ret        = execute_impl(plan, plan.root);
+    auto ret_types  = plan.nodes[plan.root].output_attrs
+                   | views::transform([](const auto& v) { return std::get<1>(v); })
+                   | ranges::to<std::vector<DataType>>();
+    Table table{std::move(ret), std::move(ret_types)};
+    return table.to_columnar();
 }
-
 
 void* build_context() {
     return nullptr;
