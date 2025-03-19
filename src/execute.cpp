@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <hardware.h>
 #include <plan.h>
 #include <table.h>
 #include <thread>
@@ -318,8 +319,19 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 //                   | ranges::to<std::vector<DataType>>();
 //    Table table{std::move(ret), std::move(ret_types)};
 //    return table.to_columnar();
-
-    const int thread_num = 24;                          // 线程数（包括主线程）
+//    printf("nodes = %ld\n", plan.nodes.size());
+    int all_scan_size = 0;
+    for (int i = 0; i < plan.nodes.size(); ++i){
+        all_scan_size += std::visit([&plan](const auto& value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, ScanNode>) {
+                return plan.inputs[value.base_table_id].num_rows;
+            } else {return static_cast<size_t>(0);}
+        }, plan.nodes[i].data);
+    }
+    printf("total = %d \t", all_scan_size);
+    const int thread_num = all_scan_size >= 10000000 ? std::min(64, std::max(SPC__THREAD_COUNT / 4 * 3, 24))
+                            : (all_scan_size >= 5000000 ? 24 : 16);  // 线程数（包括主线程）
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
     std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组

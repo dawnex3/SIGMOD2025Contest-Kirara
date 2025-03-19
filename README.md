@@ -101,6 +101,7 @@ A `ColumnarTable` first stores how many rows the table has in the `num_rows` mem
 ## Requirement
 
 - You can only modify the file `src/execute.cpp` in the project.
+- You must not use any third-party libraries. If you are using libraries for development (e.g., for logging), ensure to remove them before the final submission.
 - The joining pipeline (including order and build side) is optimized by PostgreSQL for `Hash Join` only. However, in the `execute` function, you are free to use other algorithms and change the pipeline, as long as the result is equivalent.
 - For any struct listed above, all of there members are public. You can manipulate them in free functions as desired as long as the original files are not changed and the manipulated objects can be destructed properly.
 - Your program will be evaluated on an unpublished benchmark sampled from the original JOB benchmark. You will not be able to access the test benchmark.
@@ -161,4 +162,4 @@ The evaluation is automatically executed on four different servers. On multi-soc
     * Main memory: 512 GB
 
 
-For the final evaluation after the submission deadline, four additional servers will be included. These additional servers cover the same platforms but might differ in the supported feature set as they can be significantly older or newer than the initial servers.
+For the final evaluation after the submission deadline, four additional servers will be included. These additional servers cover the same platforms but might differ in the supported feature set as they can be significantly older or newer than the initial servers. All servers run Ubuntu Linux with versions ranging from 20.04 to 24.04. Code is compiled with Clang 18.
