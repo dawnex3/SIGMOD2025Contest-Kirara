@@ -199,6 +199,8 @@ public:
     return static_cast<T *>(local_allocator.allocate(n * sizeof(T)));
   }
 
+  bool operator!=(const LocalAllocatorWrapper&) const { return false; } // 假设所有分配器都相等
+
   void deallocate(T *p, std::size_t n) noexcept {
     // donothing ...
   }
