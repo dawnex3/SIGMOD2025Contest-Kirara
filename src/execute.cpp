@@ -330,7 +330,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
         }, plan_node.data);
     }
 //    printf("total = %ld \t", all_scan_size);
-    const int thread_num = all_scan_size >= 10000000 ? std::min(64, std::max(SPC__THREAD_COUNT / 4 * 3, 24))
+    const int thread_num = all_scan_size >= 10000000 ? SPC__THREAD_COUNT - 4
                             : (all_scan_size >= 5000000 ? 24 : 16);
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
