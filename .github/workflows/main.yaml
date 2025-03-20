@@ -78,13 +78,14 @@ jobs:
           $CURL_CMD -F result=$EXIT_CODE -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_advanced
           exit $EXIT_CODE
 
+      # We add a 30 min time limit for the evaluation. Teams using the reference implementation will not finish.
       - name: Run Benchmark
         working-directory: ${{env.REPO_DIR}}
         # For now, we only test "a" versions of the plans to keep the runtime short.
         run: |
-          timeout 1200 numactl -m 0 -N 0 ${{env.BUILD_DIR}}/run plans.json 1a 2a 3a 4a 5a 6a 7a 8a 9a 10a 11a 12a 13a 14a 15a 16a 17a 18a 19a 20a 21a 22a 23a 24a 25a 26a 27a 28a 29a 30a 31a 32a 33a $BM_RESULT_FILE
+          timeout 1800 numactl -m 0 -N 0 ${{env.BUILD_DIR}}/run plans.json $BM_RESULT_FILE
           EXIT_CODE=$?
-          $CURL_CMD -F runtime=`cat $BM_RESULT_FILE` -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_benchmark
+          $CURL_CMD -F runtime=`cat $BM_RESULT_FILE` -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_full_benchmark
           exit $EXIT_CODE
 
       - name: Clean Up
