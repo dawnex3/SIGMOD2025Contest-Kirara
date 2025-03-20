@@ -310,6 +310,112 @@ void test_hash(){
     exit(1);
 }
 
+struct Trunk {
+    Trunk *prev;
+    std::string str;
+    Trunk(Trunk *prev, const std::string &str) : prev(prev), str(str) {}
+};
+
+// 用递归方式打印 Trunk 链，即打印从根到当前节点的所有前缀
+void showPlanTrunks(Trunk *p) {
+    if (p == nullptr)
+        return;
+    showPlanTrunks(p->prev);
+    std::cout << p->str;
+}
+
+// 辅助函数，将当前 PlanNode 转换为字符串描述
+std::string planNodeToString(const Plan &plan, size_t nodeIndex) {
+    const PlanNode &node = plan.nodes[nodeIndex];
+    std::string output_attrs_str = "[";
+    bool first = true;
+    for (const auto &attr : node.output_attrs) {
+        if (!first) {
+            output_attrs_str += ", ";
+        }
+        first = false;
+        output_attrs_str += std::to_string(std::get<0>(attr));
+    }
+    output_attrs_str += "]";
+
+    if (std::holds_alternative<ScanNode>(node.data)) {
+        const ScanNode &scan = std::get<ScanNode>(node.data);
+        return "Scan " + std::to_string(nodeIndex)
+             + ": table=" + std::to_string(scan.base_table_id)
+             + ", " + output_attrs_str;
+    } else if (std::holds_alternative<JoinNode>(node.data)) {
+        const JoinNode &join = std::get<JoinNode>(node.data);
+        return "Join " + std::to_string(nodeIndex)
+             + ": build_" + (join.build_left ? "left" : "right")
+             + ", left_attr=" + std::to_string(join.left_attr)
+             + ", right_attr=" + std::to_string(join.right_attr)
+             + ", " + output_attrs_str;
+    }
+    return "Unknown";
+}
+
+// ------------------ 打印 Plan 树的函数（上为右，下为左） ------------------
+// 1. 递归打印右子树（如果有），在递归调用时传入新的 Trunk
+// 2. 根据当前传入的 prev 指针及 isLeft 参数设置当前连接符
+// 3. 打印当前节点的描述信息（连接上前缀）
+// 4. 递归打印左子树（如果有）
+void printPlanHelper(const Plan &plan, size_t nodeIndex, Trunk *prev, bool isLeft) {
+    // 超出范围直接返回
+    if (nodeIndex >= plan.nodes.size()) {
+        return;
+    }
+
+    // 构造一个用于本节点显示前缀的 Trunk 节点
+    std::string prev_str = "       ";
+    Trunk *trunk = new Trunk(prev, prev_str);
+
+    // 判断当前节点是否为 JoinNode（才具有左右子树）
+    bool isJoin = std::holds_alternative<JoinNode>(plan.nodes[nodeIndex].data);
+
+    // 如果是 JoinNode，先递归打印右子树
+    if (isJoin) {
+        const JoinNode &join = std::get<JoinNode>(plan.nodes[nodeIndex].data);
+        printPlanHelper(plan, join.right, trunk, true);
+    }
+
+    // 设置当前分支的模式：如果没有前驱，说明是根节点；否则根据是否为左侧
+    if (!prev) {
+        trunk->str = "———";
+    }
+    else if (isLeft) {
+        trunk->str = ".———";
+        prev_str = "      |";
+    }
+    else { // 右侧
+        trunk->str = "`———";
+        if (prev)
+            prev->str = prev_str;
+    }
+
+    // 打印前缀信息和当前节点描述
+    showPlanTrunks(trunk);
+    std::cout << " " << planNodeToString(plan, nodeIndex) << std::endl;
+
+    if (prev) {
+        prev->str = prev_str;
+    }
+    trunk->str = "      |";
+
+    // 如果是 JoinNode，则递归打印左子树
+    if (isJoin) {
+        const JoinNode &join = std::get<JoinNode>(plan.nodes[nodeIndex].data);
+        printPlanHelper(plan, join.left, trunk, false);
+    }
+
+    // 注意：释放当前 trunk 内存（本示例中未做复杂内存管理，使用 new/delete ）
+    delete trunk;
+}
+
+// 对外接口：从 plan.root 开始打印整个 Plan 树
+void printPlanTree(const Plan &plan) {
+    printPlanHelper(plan, plan.root, nullptr, false);
+}
+
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 //    namespace views = ranges::views;
 //    auto ret        = execute_impl(plan, plan.root);
@@ -318,6 +424,8 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 //                   | ranges::to<std::vector<DataType>>();
 //    Table table{std::move(ret), std::move(ret_types)};
 //    return table.to_columnar();
+
+    //printPlanTree(plan);
 
     const int thread_num = 24;                          // 线程数（包括主线程）
     const int vector_size = 1024;                       // 向量化的批次大小
