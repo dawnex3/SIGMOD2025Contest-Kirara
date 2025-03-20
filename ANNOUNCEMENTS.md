@@ -1,5 +1,20 @@
 # Announcements
 
+### 2025-03-18
+  - With this pull request, we will evaluate all queries in the benchmark.
+  - Several people asked what to expect in the final evaluation:
+    - There will be no joins on any non-integer-column (similar to the original JoinOrder Benchmark)
+    - There will be no "advanced tests" that cover edge cases which you need to pass
+      - However, expect to handle any string that is part of the IMDB-JOB dataset
+    - Benchmarks on the new evaluation servers are also limited to a single NUMA node
+    - The data set will be the same as used right now without any further modifications
+    - **Hardware headers**:
+      - We create the `hardware.h` header in the Github workflow. For that reason there is no single `hardware.h` file as we have multiple (hidden) servers.
+      - For local development, we recommend to take a suitable header file (e.g., `hardware__sidon.h` for Intel machines) and use that one as "your local" `hardware.h`. Please note that this file will be overwritten in the benchmark runs.
+    - **Data Access and Global Context**:
+      - You are not allowed to access the original data set or the queries in any way. Only data that is passed to you in `execute()`. A typical example for global context usage is creating a thread pool or scheduler.
+      - The global context can further be used to store information that is gathered during query execution.
+
 ### 2025-03-13
   - We provide a new header, `hardware.h`. This header contains basic hardware information which enables optimizing for a server's cache sizes or vectorization capabilities.
     - If you miss any information or find issues with the headers, please do not hesitate to contact us.
