@@ -332,6 +332,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 //    printf("total = %ld \t", all_scan_size);
     const int thread_num = all_scan_size >= 10000000 ? std::min(64, std::max((SPC__THREAD_COUNT / 4 - (SPC__THREAD_COUNT % 4 == 0)) * 4, 24))
                             : (all_scan_size >= 5000000 ? 24 : 16);
+//    const int thread_num = 1;
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
     std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
@@ -395,7 +396,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     // delete global_mempool;
     // global_mempool = nullptr;
 
-    std::this_thread::sleep_for(std::chrono::seconds(2));   // 让cpu休息一下吧 :)
+    std::this_thread::sleep_for(std::chrono::milliseconds (1200));   // 让cpu休息一下吧 :)
     return result;
 }
 
