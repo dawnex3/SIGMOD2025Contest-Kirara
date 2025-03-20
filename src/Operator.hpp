@@ -443,29 +443,44 @@ public:
 
                 // 支持含null列
                 assert(col->type==DataType::INT32);
+                Page *const * prev_current_page = nullptr;
+                uint32_t prev_offset = offset;
+                size_t nonnull_count = 0;
+                const uint8_t* bitmap = nullptr;
+                uint32_t cur_page_row_num = getRowCount(*current_page);
                 for(uint32_t i=0; i<n; i++){
                     // 定位到probe_matches_[i]所在的Page，和页内偏移
-                    while(offset >= getRowCount(*current_page)){
-                        offset -= getRowCount(*current_page);
-                        current_page++;
+                    while(offset >= cur_page_row_num){
+                        offset -= cur_page_row_num;
+                        cur_page_row_num = getRowCount(*++current_page);
                     }
-                    const uint8_t* bitmap = getBitmap(*current_page);
+                    if (prev_current_page != current_page){
+                        bitmap = getBitmap(*current_page);
+                        nonnull_count = getNonNullCount(bitmap, offset);
+                        prev_offset = offset;
+                    }
 
                     // 取出数据，进行比较
-                    if(!isNotNull(bitmap, offset)){
-                        offset += probe_matches_[i+1] - probe_matches_[i];
-                        continue;
-                    }
-                    const int32_t* data_ptr = getPageData<int32_t>(*current_page) + getNonNullCount(bitmap, offset);
-                    int32_t right_key = *data_ptr;
-                    int32_t left_key = *(int32_t*)((uint8_t*)build_matches_[i] + key_offset);
-                    if(left_key == right_key){
-                        build_matches_[found] = build_matches_[i];
-                        probe_matches_[found] = probe_matches_[i];
-                        found++;
+                    if(isNotNull(bitmap, offset)){
+                        if (prev_current_page == current_page){
+        //                    auto correct_nonnull_count = getNonNullCount(bitmap, offset);
+                            nonnull_count += getNonNullCount(bitmap, prev_offset, offset);
+        //                    printf("bits = %u %u\n", offset, prev_offset);
+                        }
+                        const int32_t* data_ptr = getPageData<int32_t>(*current_page) + nonnull_count;
+                        int32_t right_key = *data_ptr;
+                        int32_t left_key = *(int32_t*)((uint8_t*)build_matches_[i] + key_offset);
+                        if(left_key == right_key){
+                            build_matches_[found] = build_matches_[i];
+                            probe_matches_[found] = probe_matches_[i];
+                            found++;
+                        }
+                        prev_offset = offset;
                     }
 
+                    prev_current_page = current_page;
                     offset += probe_matches_[i+1] - probe_matches_[i];
+//                    printf("probe bits = %u\n", probe_matches_[i+1] - probe_matches_[i]);
                 }
             }
         }, right_col);
