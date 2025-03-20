@@ -397,7 +397,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     // global_mempool = nullptr;
 
     std::this_thread::sleep_for(std::chrono::milliseconds (1200));   // 让cpu休息一下吧 :)
-    // 2.27 1.71 x 3.58
+    // 2.27 1.71 xxx 3.58
     return result;
 }
 
