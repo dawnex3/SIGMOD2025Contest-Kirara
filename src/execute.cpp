@@ -439,7 +439,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     int thread_num = all_scan_size >= 10000000 ? std::min(64, std::max((SPC__THREAD_COUNT / 4 - (SPC__THREAD_COUNT % 4 == 0)) * 4, 24))
                             : (all_scan_size >= 5000000 ? 24 : std::min(SPC__CORE_COUNT, 16));
     if (SPC__THREAD_COUNT / SPC__CORE_COUNT == 8 && thread_num >= 64)
-        thread_num = SPC__CORE_COUNT * 4;
+        thread_num = SPC__CORE_COUNT * 2;
 //    const int thread_num = 1;
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
