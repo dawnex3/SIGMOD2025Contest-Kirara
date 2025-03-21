@@ -13,8 +13,11 @@
 #include <cstdlib>
 #include <vector>
 #include <mutex>
+#include "hardware.h"
 
-//#define NO_USE_MEMPOOL
+#ifdef SPC__PPC64LE
+#define NO_USE_MEMPOOL
+#endif
 
 namespace mem {
 inline void* malloc_huge(size_t size) {
