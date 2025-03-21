@@ -14,7 +14,7 @@
 #include <vector>
 #include <mutex>
 
-// #define NO_USE_MEMPOOL 
+#define NO_USE_MEMPOOL
 
 namespace mem {
 inline void* malloc_huge(size_t size) {
