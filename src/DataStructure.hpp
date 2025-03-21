@@ -211,6 +211,10 @@ public:
 
 };
 
+class ResultColumn{
+
+};
+
 // 调用算子next得到的结果表。每一列可能是已经实例化的，也有可能只是给出了在原表中的行号。
 // SCAN算子给出的结果都是未实例化的，并且是一段连续的行号。
 // JOIN算子会将链接键值实例化。
@@ -228,13 +232,13 @@ public:
     //    表示引用的原始列，以及起始行所在的页码，以及起始行在该页之内的位置。
     using ContinuousColumn = std::tuple<const Column*, uint32_t, uint32_t>;
 
-    // 3. 未实例化且行号不连续的列，以 std::pair<Column *, uint32_t *> 表示，
-    //    表示引用的原始列，以及存储这些不连续行号的数组（多个未实例化列的行号可能完全相同，因而指向同一个行号数组）。
-    //    这个类被弃用了，因为从NonContinuousColumn读取实际值的代价很大，有很多的随机访问，还需要计算行号。
-    //    using NonContinuousColumn = std::pair<Column *, uint32_t *>;
+    // 3. 未实例化且行号不连续的列，以 std::tuple<const Column*, uint32_t, uint32_t, uint32_t *> 表示，
+    //    表示引用的原始列，以及存储这些不连续行号的数组（多个未实例化列的行号可能完全相同，因而指向同一个行号数组）。实际上NonContinuousColumn = ContinuousColumn + 行号数组
+    //    注意：行号数组必须是递增的
+    using NonContinuousColumn = std::tuple<const Column*, uint32_t, uint32_t, const uint32_t *>;
 
     // 将以上两种列类型组合成一个 std::variant 类型
-    using ColumnVariant = std::variant<InstantiatedColumn, ContinuousColumn>;
+    using ColumnVariant = std::variant<InstantiatedColumn, ContinuousColumn, NonContinuousColumn>;
 
     // 存储所有列的变体集合
     LocalVector<ColumnVariant> columns_;
@@ -487,7 +491,7 @@ void gatherInstantiatedCol(OperatorResultTable::InstantiatedColumn input_column,
             }
             col_target += col_step;
         }
-    } else if(input_column.first==DataType::VARCHAR){
+    } else if(input_column.first==DataType::VARCHAR || input_column.first==DataType::INT64){
         const uint64_t* base = (uint64_t*)input_column.second;
         for (size_t i = 0; i < n; ++i) {
             if constexpr (SpecifiedIndex){
