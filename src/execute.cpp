@@ -330,7 +330,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
         }, plan_node.data);
     }
 //    printf("total = %ld \t", all_scan_size);
-    const int thread_num = all_scan_size >= 10000000 ? std::min(64, std::max((SPC__THREAD_COUNT / 4 - (SPC__THREAD_COUNT % 4 == 0)) * 4, 24))
+    int thread_num = all_scan_size >= 10000000 ? std::min(64, std::max((SPC__THREAD_COUNT / 4 - (SPC__THREAD_COUNT % 4 == 0)) * 4, 24))
                             : (all_scan_size >= 5000000 ? 24 : 16);
 #ifdef SPC__PPC64LE
     if (thread_num == 16)
