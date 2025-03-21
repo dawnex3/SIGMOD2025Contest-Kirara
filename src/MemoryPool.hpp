@@ -14,7 +14,7 @@
 #include <vector>
 #include <mutex>
 
-#define NO_USE_MEMPOOL
+//#define NO_USE_MEMPOOL
 
 namespace mem {
 inline void* malloc_huge(size_t size) {
@@ -125,7 +125,7 @@ inline void GlobalPool::reset() {
     std::free(alloc);
   }
   allocated_.clear();
-  fmt::println("sql use memory: {}", allocated_size_);
+//  fmt::println("sql use memory: {}", allocated_size_);
   allocated_size_ = 0;
 #endif
 }

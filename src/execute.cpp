@@ -332,12 +332,8 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 //    printf("total = %ld \t", all_scan_size);
     int thread_num = all_scan_size >= 10000000 ? std::min(64, std::max((SPC__THREAD_COUNT / 4 - (SPC__THREAD_COUNT % 4 == 0)) * 4, 24))
                             : (all_scan_size >= 5000000 ? 24 : 16);
-#ifdef SPC__PPC64LE
-    if (thread_num == 16)
-        thread_num = 12;
-    else if (thread_num != 24)
-        thread_num = 60;
-#endif
+    if (SPC__THREAD_COUNT / SPC__CORE_COUNT >= 4 && thread_num >= 64)
+        thread_num = std::max(64, SPC__THREAD_COUNT - SPC__CORE_COUNT);
 //    const int thread_num = 1;
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
@@ -403,7 +399,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     // global_mempool = nullptr;
 
     std::this_thread::sleep_for(std::chrono::milliseconds (1200));   // 让cpu休息一下吧 :)
-    // 2.27 1.71 xxx 3.58
+    // 2.26 1.66 5.01 3.46
     return result;
 }
 
