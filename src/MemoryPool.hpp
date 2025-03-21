@@ -13,8 +13,11 @@
 #include <cstdlib>
 #include <vector>
 #include <mutex>
+#include "hardware.h"
 
-// #define NO_USE_MEMPOOL 
+#ifdef SPC__PPC64LE
+#define NO_USE_MEMPOOL
+#endif
 
 namespace mem {
 inline void* malloc_huge(size_t size) {
@@ -125,7 +128,7 @@ inline void GlobalPool::reset() {
     std::free(alloc);
   }
   allocated_.clear();
-  fmt::println("sql use memory: {}", allocated_size_);
+//  fmt::println("sql use memory: {}", allocated_size_);
   allocated_size_ = 0;
 #endif
 }
@@ -198,6 +201,8 @@ public:
   T *allocate(std::size_t n) {
     return static_cast<T *>(local_allocator.allocate(n * sizeof(T)));
   }
+
+  bool operator!=(const LocalAllocatorWrapper&) const { return false; } // 假设所有分配器都相等
 
   void deallocate(T *p, std::size_t n) noexcept {
     // donothing ...

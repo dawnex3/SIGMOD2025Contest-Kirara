@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <hardware.h>
 #include <plan.h>
 #include <table.h>
 #include <thread>
@@ -425,9 +426,21 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 //    Table table{std::move(ret), std::move(ret_types)};
 //    return table.to_columnar();
 
-    //printPlanTree(plan);
-
-    const int thread_num = 24;                          // 线程数（包括主线程）
+    size_t all_scan_size = 0;
+    for (const auto& plan_node: plan.nodes){
+        all_scan_size += std::visit([&plan](const auto& value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, ScanNode>) {
+                return plan.inputs[value.base_table_id].num_rows;
+            } else {return static_cast<size_t>(0);}
+        }, plan_node.data);
+    }
+//    printf("total = %ld \t", all_scan_size);
+    int thread_num = all_scan_size >= 10000000 ? std::min(64, std::max((SPC__THREAD_COUNT / 4 - (SPC__THREAD_COUNT % 4 == 0)) * 4, 24))
+                            : (all_scan_size >= 5000000 ? 24 : std::min(SPC__CORE_COUNT, 16));
+    if (SPC__THREAD_COUNT / SPC__CORE_COUNT == 8 && thread_num >= 64)
+        thread_num = SPC__CORE_COUNT * 4;
+//    const int thread_num = 1;
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
     std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
@@ -491,7 +504,8 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     // delete global_mempool;
     // global_mempool = nullptr;
 
-    // std::this_thread::sleep_for(std::chrono::seconds(2));   // 让cpu休息一下吧 :)
+    std::this_thread::sleep_for(std::chrono::milliseconds (1200));   // 让cpu休息一下吧 :)
+    // 2.26 1.66 5.01 3.46
     return result;
 }
 

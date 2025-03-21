@@ -42,9 +42,8 @@ jobs:
           # Clones the repository to the subdir `repo`.
           path: repo
 
-      - name: Copy Evaluation Files
-        working-directory: ${{env.REPO_DIR}}
-        run: unzip -o -P '${{secrets.SERVER_FILES_PW}}' /server_files.zip && mv server_files/imdb . && mv server_files/duckdb/imdb.db .
+      - name: Copy Hardware Header
+        run: cp $REPO_DIR/include/hardware__`hostname`.h $REPO_DIR/include/hardware.h
 
       - name: Create Build Environment
         run: cmake -E make_directory $BUILD_DIR
@@ -66,22 +65,27 @@ jobs:
           $CURL_CMD -F result=$EXIT_CODE -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_basic
           exit $EXIT_CODE
 
+      - name: Copy Evaluation Files
+        working-directory: ${{env.REPO_DIR}}
+        run: unzip -o -P '${{secrets.SERVER_FILES_PW}}' /server_files.zip && mv server_files/imdb . && mv server_files/duckdb/imdb.db .
+
       - name: Run Query Plan Tests
         working-directory: ${{env.REPO_DIR}}
         # Only allow test run of 300 seconds. We selected a few fast plans.
         run: |
-          timeout 300 ${{env.BUILD_DIR}}/run plans.json 1b 1c 3b 5a 5b 8b
+          timeout 180 ${{env.BUILD_DIR}}/run plans.json 1b 1c 3b 5a 5b 8b
           EXIT_CODE=$?
           $CURL_CMD -F result=$EXIT_CODE -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_advanced
           exit $EXIT_CODE
 
+      # We add a 30 min time limit for the evaluation. Teams using the reference implementation will not finish.
       - name: Run Benchmark
         working-directory: ${{env.REPO_DIR}}
         # For now, we only test "a" versions of the plans to keep the runtime short.
         run: |
-          timeout 7200 numactl -m 0 -N 0 ${{env.BUILD_DIR}}/run plans.json 1a 2a 3a 4a 5a 6a 7a 8a 9a 10a 11a 12a 13a 14a 15a 16a 17a 18a 19a 20a 21a 22a 23a 24a 25a 26a 27a 28a 29a 30a 31a 32a 33a $BM_RESULT_FILE
+          timeout 1800 numactl -m 0 -N 0 ${{env.BUILD_DIR}}/run plans.json $BM_RESULT_FILE
           EXIT_CODE=$?
-          $CURL_CMD -F runtime=`cat $BM_RESULT_FILE` -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_benchmark
+          $CURL_CMD -F runtime=`cat $BM_RESULT_FILE` -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_full_benchmark
           exit $EXIT_CODE
 
       - name: Clean Up
