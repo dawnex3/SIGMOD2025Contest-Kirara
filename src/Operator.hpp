@@ -418,7 +418,7 @@ public:
                         }
 
                         uint64_t hash = hash_32(key);
-                        uint64_t hk = (hash << 32) | static_cast<uint32_t>(key);
+                        uint64_t hk = (hash << 32) | static_cast<uint32_t>(key);    // 千万注意，不能写成(hash << 32) | key，会发生符号扩展
                         *(uint64_t *)target=hk;
                         target += step;
                     }
