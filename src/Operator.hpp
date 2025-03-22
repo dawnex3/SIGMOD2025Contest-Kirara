@@ -145,7 +145,7 @@ private:
     // 保存上次next的最后状态，用于下次next恢复任务继续进行
     struct IteratorContinuation
     {
-        Hashmap::hash_t probe_hash_{0};        // 上次未探测完的哈希值
+        uint64_t probe_hk_{0};        // 上次未探测完的哈希值和键值
         Hashmap::EntryHeader* last_chain_{nullptr};  // 上次未完成的哈希链表
 
         // 额外的状态，指示循环队列的开始和结束位置。专门用于joinSelParallel
@@ -172,7 +172,7 @@ private:
     bool is_build_{false};      // 指示哈希表是否已经构建完毕
 
     OperatorResultTable right_result_;      // 上次调用right_算子得到的结果
-    Hashmap::hash_t* probe_hashes_;         // right_result_的键值列的哈希值
+    uint64_t * probe_hks_;                  // right_result_的键值列的哈希值与键值组合
     Hashmap::EntryHeader** build_matches_;  // 哈希表中匹配的条目
     uint32_t * probe_matches_;              // 构建侧匹配的行的行号
 
@@ -188,7 +188,8 @@ private:
     Hashmap::EntryHeader** queue_build_;    // 构建侧的循环队列，指向Entry
 
 #ifdef DEBUG_LOG
-    size_t total_output{0};
+    size_t      probe_rows_{0};
+    size_t      output_rows_{0};
     std::string table_str;
 #endif
 
@@ -204,7 +205,7 @@ public:
         build_value_offsets_.resize(left_attrs.size());
         ht_entry_size_ = (sizeof(Hashmap::EntryHeader) + 3) & ~3;   // 将EntryHeader大小补齐到4倍数
         for(uint32_t i=0; i<left_attrs.size(); i++){
-            if(std::get<1>(left_attrs[i])==DataType::INT32){
+            if(std::get<1>(left_attrs[i])==DataType::INT32 && i!=left_idx){ // 此处跳过构建侧键值。它存储在EntryHeader里面而不是后面
                 build_value_offsets_[i]=ht_entry_size_;
                 ht_entry_size_ += 4;
             }
@@ -219,12 +220,16 @@ public:
         }
 
         // 分配缓冲区的内存
-        probe_hashes_ = (Hashmap::hash_t*)local_allocator.allocate(vec_size_*sizeof(Hashmap::hash_t));
+        probe_hks_     = (uint64_t *)local_allocator.allocate(vec_size_*sizeof(uint64_t));
         build_matches_ = (Hashmap::EntryHeader**)local_allocator.allocate(vec_size_*sizeof(Hashmap::EntryHeader*));
         probe_matches_ = (uint32_t*)local_allocator.allocate((vec_size_+1)*sizeof(uint32_t));
 
         // 分配结果表last_result_的内存，设置output_attrs_
         for(auto [col_idx, col_type]:output_attrs){
+            // 如果构建侧的连接键需要输出，那么换成探测侧的连接键来输出。这样方便收集
+            if(col_idx==left_idx){
+                col_idx = right_idx + left_attrs.size();
+            }
             output_attrs_.push_back(col_idx);
             if(col_type==DataType::INT32){
                 void* col_buffer = local_allocator.allocate(vec_size*sizeof(int32_t));
@@ -266,10 +271,9 @@ public:
                 uint8_t *ht_entrys = (uint8_t*)local_allocator.allocate(n * ht_entry_size_);
                 allocations_.emplace_back(ht_entrys, n);
 
-                // 从数据源OperatorResultTable取出键值，计算键的哈希值并存储到EntryHeader当中。键本身也要存储到EntryHeader。
+                // 从数据源OperatorResultTable取出键值，计算键的哈希值并与键本身一起存储到EntryHeader当中。
                 OperatorResultTable::ColumnVariant  left_key = left_table.columns_[left_idx_];
-                calculateColHash<true>(left_key, n, ht_entrys+offsetof(Hashmap::EntryHeader, hash), ht_entry_size_,
-                    ht_entrys+build_value_offsets_[left_idx_],ht_entry_size_);
+                calculateColHash(left_key, n, ht_entrys+offsetof(Hashmap::EntryHeader, hash_and_key), ht_entry_size_);
 
                 // 将构建侧的其他列存储到EntryHeader后面。
                 for(int col_idx=0; col_idx<left_table.columns_.size(); col_idx++){
@@ -284,6 +288,9 @@ public:
             profile_guard.pause();
             current_barrier->wait([&]() {   // 等待所有线程完成计算，确定哈希表大小
                 auto total_found = shared_.found_.load();
+#ifdef DEBUG_LOG
+                printf("join %zu: build_rows=%lu\n",shared_.get_operator_id()-1,total_found);
+#endif
                 if (total_found) shared_.hashmap_.setSize(total_found);
             });
             profile_guard.resume();
@@ -314,55 +321,67 @@ public:
                 profile_guard.add_input_row_count(right_result_.num_rows_);
                 cont_.next_probe_ = 0;
                 cont_.num_probe_ = right_result_.num_rows_;
+#ifdef DEBUG_LOG
+                probe_rows_ += cont_.num_probe_;
+#endif
                 if (cont_.num_probe_ == 0) {
                     last_result_.num_rows_ = 0;
 #ifdef DEBUG_LOG
-                    // 打印该节点输出的总行数
-//                    printf("join output rows: %ld, details:\n",total_output);
+                    printf("join %zu: output_rows=%ld, probe_rows=%ld\n",shared_.get_operator_id()-1,output_rows_,probe_rows_);
 //                    std::cout<<table_str<<std::endl;
-                    std::ofstream log("log_false.txt", std::ios::app);
-                    log << "join "<< shared_.get_operator_id()-1 <<" output rows: " << total_output << ", details:\n";
-                    log << table_str <<std::endl;
-                    log.close();
+//                    std::ofstream log("log_false.txt", std::ios::app);
+//                    log << "join "<< shared_.get_operator_id()-1 <<" output rows: " << output_rows_ << ", details:\n";
+//                    log << table_str <<std::endl;
+//                    log.close();
 #endif
                     return last_result_;
                 }
-                // 计算right_result_中键的哈希值，存储到probe_hashes_数组中
-                calculateColHash<false>(right_result_.columns_[right_idx_],right_result_.num_rows_,
-                    (uint8_t *)probe_hashes_,sizeof(Hashmap::hash_t));
+                // 计算right_result_中键的哈希值，存储到probe_hks_数组中
+                calculateColHash(right_result_.columns_[right_idx_], right_result_.num_rows_,
+                    (uint8_t *)probe_hks_, sizeof(uint64_t));
             }
-            // 调用探测函数，检测哈希值相等的(Entry*, pos)对，分别存储在build_matches_和probe_matches_中
+            // 调用探测函数，检测哈希值和键值都相等的(Entry*, pos)对，分别存储在build_matches_和probe_matches_中
             uint32_t n = joinAll();
-            // 检查(Entry*, pos)对的键值是否确实相等，移除不相等的对
-            n = checkKeyEquality(n);
             if (n == 0) continue;
             // 物化最终结果。将匹配的(Entry*, pos)中，左侧的值收集起来，右侧对应的行的值也收集起来
             last_result_.num_rows_ = n;
-            size_t curr_out_col = 0;
-            for(size_t col_idx:output_attrs_){
-                size_t left_column_num = left_->resultColumnNum();
-                auto column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[curr_out_col]);
-                curr_out_col++;
-                if(col_idx < left_column_num){      //如果是构建表
-                    gatherEntry(column,n,build_value_offsets_[col_idx]);
-                } else {                            // 如果是探测表
-                    gatherCol<true>(right_result_.columns_[col_idx-left_column_num],n,
-                        (uint8_t*)column.second,column.first==DataType::INT32 ? 4:8,probe_matches_);
+            size_t left_column_num = left_->resultColumnNum();
+            for(size_t out_idx=0;out_idx<output_attrs_.size();out_idx++) {
+                auto column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[out_idx]);
+                size_t in_idx = output_attrs_[out_idx];
+                if (in_idx < left_column_num) { // 如果是构建表
+                    gatherEntry(column, n, build_value_offsets_[in_idx]);
+                } else if(in_idx - left_column_num != right_idx_ ){  // 如果是探测表的非键值侧
+                    gatherCol<true>(right_result_.columns_[in_idx - left_column_num], n,
+                        (uint8_t*)column.second, column.first == DataType::INT32 ? 4 : 8, probe_matches_);
+                } else {    // 如果是探测表的键值侧
+                    OperatorResultTable::ColumnVariant key_col = right_result_.columns_[in_idx - left_column_num];
+                    std::visit([&](auto&& key_col) {
+                        using T = std::decay_t<decltype(key_col)>;
+                        if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
+                            // 如果键值列已经实例化
+                            gatherCol<true>(key_col, n,
+                                (uint8_t*)column.second, column.first == DataType::INT32 ? 4 : 8, probe_matches_);
+                        } else {
+                            // 如果键值列未实例化，则从probe_hks_中提取
+                            gatherCol<true>(std::make_pair(DataType::INT64, (void*)probe_hks_), n,
+                                (uint8_t*)column.second, column.first == DataType::INT32 ? 4 : 8, probe_matches_);
+                        }
+                    }, key_col);
                 }
             }
+
             profile_guard.add_output_row_count(n);
 #ifdef DEBUG_LOG
-            total_output += n;
-            table_str.append(last_result_.toString(false));
+            output_rows_ += n;
+//            table_str.append(last_result_.toString(false));
 #endif
             return last_result_;
         }
     }
 
-
-    // 计算一列的哈希值，并存储到指定位置。该列必须为INT32
-    template <bool RestoreColumn>   //可选：将列值本身也存储到指定位置
-    void calculateColHash(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* hash_target, size_t hast_step, uint8_t* col_target=nullptr, size_t col_step=0){
+    // 计算一列的哈希值，与该列本身一起组成uint64，存储到指定位置
+    void calculateColHash(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* target, size_t step){
         std::visit([&](auto&& arg) {
             using T = std::decay_t<decltype(arg)>;
             if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
@@ -370,13 +389,10 @@ public:
                 assert(arg.first==DataType::INT32);
                 const int32_t* base = (int32_t*)arg.second;
                 for (size_t i = 0; i < n; ++i) {
-                    assert(base[i]==NULL_INT32 || hash_32(base[i])!=NULL_HASH);
-                    *(Hashmap::hash_t *)hash_target=hash_32(base[i]);
-                    hash_target += hast_step;
-                    if constexpr (RestoreColumn){
-                        *(int32_t*)(col_target) = base[i];
-                        col_target += col_step;
-                    }
+                    uint64_t hash = hash_32(base[i]);
+                    uint64_t hk = (hash << 32) | base[i];
+                    *(uint64_t *)target=hk;
+                    target += step;
                 }
             } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn>) {
                 // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>，它存放在多个Page中。
@@ -397,95 +413,17 @@ public:
                             base++;
                         }
 
-                        assert(key==NULL_INT32 || hash_32(key)!=NULL_HASH);
-                        *(Hashmap::hash_t *)hash_target=hash_32(key);
-                        hash_target += hast_step;
-                        if constexpr (RestoreColumn){
-                            *(int32_t*)(col_target) = key;
-                            col_target += col_step;
-                        }
+                        uint64_t hash = hash_32(key);
+                        uint64_t hk = (hash << 32) | key;
+                        *(uint64_t *)target=hk;
+                        target += step;
                     }
-
                     n -= end_row-start_row;
                     if(n<=0) break;
                 }
 
             }
         }, input_column);
-    }
-
-
-    // 检查(Entry*, pos)两侧键值是否相等，移除不相等的(Entry*, pos)，返回相等的对数
-    uint32_t checkKeyEquality(uint32_t n){
-        uint32_t found = 0;
-        size_t key_offset = build_value_offsets_[left_idx_];
-        OperatorResultTable::ColumnVariant right_col = right_result_.columns_[right_idx_];
-
-        std::visit([&](auto&& arg) {
-            using T = std::decay_t<decltype(arg)>;
-            if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
-                assert(arg.first==DataType::INT32);
-                const int32_t* base = (int32_t*)arg.second;
-                for (uint32_t i = 0; i < n; i++) {
-                    int32_t left_key = *(int32_t*)((uint8_t*)build_matches_[i] + key_offset);
-                    int32_t right_key = base[probe_matches_[i]];
-                    if(left_key == right_key){
-                        build_matches_[found] = build_matches_[i];
-                        probe_matches_[found] = probe_matches_[i];
-                        found++;
-                    }
-                }
-            } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn>) {
-                // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>。
-                const Column* col = std::get<0>(arg);
-                Page *const * current_page = col->pages.data() + std::get<1>(arg);
-                uint32_t offset = probe_matches_[0] + std::get<2>(arg);
-
-                // 支持含null列
-                assert(col->type==DataType::INT32);
-                Page *const * prev_current_page = nullptr;
-                uint32_t prev_offset = offset;
-                size_t nonnull_count = 0;
-                const uint8_t* bitmap = nullptr;
-                uint32_t cur_page_row_num = getRowCount(*current_page);
-                for(uint32_t i=0; i<n; i++){
-                    // 定位到probe_matches_[i]所在的Page，和页内偏移
-                    while(offset >= cur_page_row_num){
-                        offset -= cur_page_row_num;
-                        cur_page_row_num = getRowCount(*++current_page);
-                    }
-                    if (prev_current_page != current_page){
-                        bitmap = getBitmap(*current_page);
-                        nonnull_count = getNonNullCount(bitmap, offset);
-                        prev_offset = offset;
-                    }
-
-                    // 取出数据，进行比较
-                    if(isNotNull(bitmap, offset)){
-                        if (prev_current_page == current_page){
-        //                    auto correct_nonnull_count = getNonNullCount(bitmap, offset);
-                            nonnull_count += getNonNullCount(bitmap, prev_offset, offset);
-        //                    printf("bits = %u %u\n", offset, prev_offset);
-                        }
-                        const int32_t* data_ptr = getPageData<int32_t>(*current_page) + nonnull_count;
-                        int32_t right_key = *data_ptr;
-                        int32_t left_key = *(int32_t*)((uint8_t*)build_matches_[i] + key_offset);
-                        if(left_key == right_key){
-                            build_matches_[found] = build_matches_[i];
-                            probe_matches_[found] = probe_matches_[i];
-                            found++;
-                        }
-                        prev_offset = offset;
-                    }
-
-                    prev_current_page = current_page;
-                    offset += probe_matches_[i+1] - probe_matches_[i];
-//                    printf("probe bits = %u\n", probe_matches_[i+1] - probe_matches_[i]);
-                }
-            }
-        }, right_col);
-
-        return found;
     }
 
 
@@ -511,7 +449,7 @@ public:
         // 处理上次未完成的哈希链表
         if(cont_.last_chain_!= nullptr){
             for (Hashmap::EntryHeader* entry = cont_.last_chain_; entry != nullptr; entry = entry->next) {
-                if (entry->hash == cont_.probe_hash_) {
+                if (entry->hash_and_key == cont_.probe_hk_) {
                     build_matches_[found] = entry;              // 记录左表（哈希表）匹配的EntryHeader
                     probe_matches_[found] = cont_.next_probe_;  // 记录右表匹配的行号
                     found ++;
@@ -530,9 +468,9 @@ public:
 
 
         for (size_t i = cont_.next_probe_, end = cont_.num_probe_; i < end; i++) {
-            Hashmap::hash_t hash = probe_hashes_[i];
-            for (auto entry = shared_.hashmap_.find_chain_tagged(hash); entry != nullptr; entry = entry->next) {
-                if (entry->hash == hash) {
+            uint64_t hk = probe_hks_[i];
+            for (auto entry = shared_.hashmap_.find_chain_tagged(hk>>32); entry != nullptr; entry = entry->next) {
+                if (entry->hash_and_key == hk) {
                     build_matches_[found] = entry;              // 记录左表（哈希表）匹配的EntryHeader
                     probe_matches_[found] = i;  // 记录右表匹配的行号
                     found ++;
@@ -540,7 +478,7 @@ public:
                         // 缓冲已满，保存状态等待下次调用
                         if(entry->next != nullptr){ //如果本次的哈希链没有处理完毕
                             cont_.last_chain_ = entry->next;
-                            cont_.probe_hash_ = hash;
+                            cont_.probe_hk_ = hk;
                             cont_.next_probe_ = i;
                             return vec_size_;
                         } else if (i + 1 < end){    //本次哈希链已处理完，但是后面还有待probe的hash
@@ -559,68 +497,68 @@ public:
 
     /// computes join result into buildMatches and probeMatches
     /// Implementation: optimized for long CPU pipelines
-    uint32_t joinAllParallel(){
-        size_t found = 0;
-        auto followup = cont_.queue_begin_;   // 队列读指针
-        auto followupWrite = cont_.queue_end_;   // 队列写指针
-
-        if (followup == followupWrite) {       // 当循环队列为空的时候
-            for (size_t i = 0, end = cont_.num_probe_; i < end; ++i) {    // 遍历该批次所有探测元组
-                auto hash = probe_hashes_[i];
-                auto entry = shared_.hashmap_.find_chain_tagged(hash);
-                if (entry != nullptr) {        // 匹配项添加到buildMatches和probeMatches
-                    if (entry->hash == hash) {
-                        build_matches_[found] = entry;
-                        probe_matches_[found] = i;
-                        found += 1;
-                    }
-                    if (entry->next != nullptr) {  // 添加id-entry对到循环队列
-                        queue_probe_[followupWrite] = i;
-                        queue_build_[followupWrite] = entry->next;
-                        followupWrite += 1;
-                    }
-                }
-            }
-        }
-
-        followupWrite %= circular_queue_size_;
-
-        while (followup != followupWrite) {          // 消耗直至队列为空
-            auto remainingSpace = vec_size_ - found;  // 该批次的剩余容量
-            auto nrFollowups = followup <= followupWrite
-                                    ? followupWrite - followup
-                                    : circular_queue_size_ - (followup - followupWrite);  // 队列的大小
-            // std::cout << "nrFollowups: " << nrFollowups << "\n";
-            auto fittingElements = std::min((size_t)nrFollowups, remainingSpace);   // fittingElements是所能处理的最大数目
-            for (size_t j = 0; j < fittingElements; ++j) {
-                size_t i = queue_probe_[followup];
-                auto entry = queue_build_[followup];
-                // followup = (followup + 1) % followupBufferSize;
-                followup = (followup + 1);
-                if (followup == circular_queue_size_) followup = 0;
-                auto hash = probe_hashes_[i];      // 取出队列最前端
-                if (entry->hash == hash) {
-                    build_matches_[found] = entry;
-                    probe_matches_[found++] = i;
-                }
-                if (entry->next != nullptr) {  // 向队列尾部添加元素
-                    queue_probe_[followupWrite] = i;
-                    queue_build_[followupWrite] = entry->next;
-                    followupWrite = (followupWrite + 1) % circular_queue_size_;
-                }
-            }
-            if (fittingElements < nrFollowups) {   // 当remainingSpace < nrFollowups时，会在此提前结束该批次。尽管批次可能未满。
-                // continuation
-                cont_.queue_end_ = followupWrite;
-                cont_.queue_begin_ = followup;
-                return found;
-            }
-        }
-        cont_.next_probe_ = cont_.num_probe_;
-        cont_.queue_end_ = 0;
-        cont_.queue_begin_ = 0;
-        return found;
-    }
+//    uint32_t joinAllParallel(){
+//        size_t found = 0;
+//        auto followup = cont_.queue_begin_;   // 队列读指针
+//        auto followupWrite = cont_.queue_end_;   // 队列写指针
+//
+//        if (followup == followupWrite) {       // 当循环队列为空的时候
+//            for (size_t i = 0, end = cont_.num_probe_; i < end; ++i) {    // 遍历该批次所有探测元组
+//                auto hash = probe_hashes_[i];
+//                auto entry = shared_.hashmap_.find_chain_tagged(hash);
+//                if (entry != nullptr) {        // 匹配项添加到buildMatches和probeMatches
+//                    if (entry->hash == hash) {
+//                        build_matches_[found] = entry;
+//                        probe_matches_[found] = i;
+//                        found += 1;
+//                    }
+//                    if (entry->next != nullptr) {  // 添加id-entry对到循环队列
+//                        queue_probe_[followupWrite] = i;
+//                        queue_build_[followupWrite] = entry->next;
+//                        followupWrite += 1;
+//                    }
+//                }
+//            }
+//        }
+//
+//        followupWrite %= circular_queue_size_;
+//
+//        while (followup != followupWrite) {          // 消耗直至队列为空
+//            auto remainingSpace = vec_size_ - found;  // 该批次的剩余容量
+//            auto nrFollowups = followup <= followupWrite
+//                                    ? followupWrite - followup
+//                                    : circular_queue_size_ - (followup - followupWrite);  // 队列的大小
+//            // std::cout << "nrFollowups: " << nrFollowups << "\n";
+//            auto fittingElements = std::min((size_t)nrFollowups, remainingSpace);   // fittingElements是所能处理的最大数目
+//            for (size_t j = 0; j < fittingElements; ++j) {
+//                size_t i = queue_probe_[followup];
+//                auto entry = queue_build_[followup];
+//                // followup = (followup + 1) % followupBufferSize;
+//                followup = (followup + 1);
+//                if (followup == circular_queue_size_) followup = 0;
+//                auto hash = probe_hashes_[i];      // 取出队列最前端
+//                if (entry->hash == hash) {
+//                    build_matches_[found] = entry;
+//                    probe_matches_[found++] = i;
+//                }
+//                if (entry->next != nullptr) {  // 向队列尾部添加元素
+//                    queue_probe_[followupWrite] = i;
+//                    queue_build_[followupWrite] = entry->next;
+//                    followupWrite = (followupWrite + 1) % circular_queue_size_;
+//                }
+//            }
+//            if (fittingElements < nrFollowups) {   // 当remainingSpace < nrFollowups时，会在此提前结束该批次。尽管批次可能未满。
+//                // continuation
+//                cont_.queue_end_ = followupWrite;
+//                cont_.queue_begin_ = followup;
+//                return found;
+//            }
+//        }
+//        cont_.next_probe_ = cont_.num_probe_;
+//        cont_.queue_end_ = 0;
+//        cont_.queue_begin_ = 0;
+//        return found;
+//    }
 
     // join implementation after Peter's suggestions
     uint32_t joinBoncz();

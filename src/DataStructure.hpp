@@ -487,6 +487,16 @@ void gatherInstantiatedCol(OperatorResultTable::InstantiatedColumn input_column,
             }
             col_target += col_step;
         }
+    } else if(input_column.first==DataType::INT64){     // 由哈希值和键值组合成的INT64
+        const uint64_t* base = (uint64_t*)input_column.second;
+        for (size_t i = 0; i < n; ++i) {
+            if constexpr (SpecifiedIndex){
+                *(int32_t*)(col_target) = static_cast<int32_t>(base[idx[i]] & 0xFFFFFFFFULL);
+            } else {
+                *(int32_t*)(col_target) = static_cast<int32_t>(base[i] & 0xFFFFFFFFULL);
+            }
+            col_target += col_step;
+        }
     } else if(input_column.first==DataType::VARCHAR){
         const uint64_t* base = (uint64_t*)input_column.second;
         for (size_t i = 0; i < n; ++i) {
