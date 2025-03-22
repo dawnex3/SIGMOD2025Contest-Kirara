@@ -279,7 +279,7 @@ ResultWriter *getPlan(const Plan& plan, SharedStateManager& shared_manager, size
     return result_writer;
 }
 
-void test_hash(){
+void testHash(){
     std::vector<uint32_t> hash_to_key((uint32_t)0xFFFFFFFF, 0);
     std::vector<bool> is_key_repeat((uint32_t)0xFFFFFFFF, false);
 
@@ -417,15 +417,8 @@ void printPlanTree(const Plan &plan) {
     printPlanHelper(plan, plan.root, nullptr, false);
 }
 
-ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-//    namespace views = ranges::views;
-//    auto ret        = execute_impl(plan, plan.root);
-//    auto ret_types  = plan.nodes[plan.root].output_attrs
-//                   | views::transform([](const auto& v) { return std::get<1>(v); })
-//                   | ranges::to<std::vector<DataType>>();
-//    Table table{std::move(ret), std::move(ret_types)};
-//    return table.to_columnar();
 
+size_t threadNum(const Plan& plan){
     size_t all_scan_size = 0;
     for (const auto& plan_node: plan.nodes){
         all_scan_size += std::visit([&plan](const auto& value) {
@@ -435,12 +428,31 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
             } else {return static_cast<size_t>(0);}
         }, plan_node.data);
     }
-//    printf("total = %ld \t", all_scan_size);
+    //    printf("total = %ld \t", all_scan_size);
     int thread_num = all_scan_size >= 10000000 ? std::min(64, std::max((SPC__THREAD_COUNT / 4 - (SPC__THREAD_COUNT % 4 == 0)) * 4, 24))
-                            : (all_scan_size >= 5000000 ? 24 : std::min(SPC__CORE_COUNT, 16));
-    if (SPC__THREAD_COUNT / SPC__CORE_COUNT == 8 && thread_num >= 64)
+                                               : (all_scan_size >= 5000000 ? 24 : std::min(SPC__CORE_COUNT, 16));
+    if (SPC__THREAD_COUNT / SPC__CORE_COUNT == 8 && thread_num >= 64){
         thread_num = SPC__CORE_COUNT * 2;
-//    const int thread_num = 1;
+    }
+    // thread_num = 1;
+    return thread_num;
+}
+
+
+ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+//    namespace views = ranges::views;
+//    auto ret        = execute_impl(plan, plan.root);
+//    auto ret_types  = plan.nodes[plan.root].output_attrs
+//                   | views::transform([](const auto& v) { return std::get<1>(v); })
+//                   | ranges::to<std::vector<DataType>>();
+//    Table table{std::move(ret), std::move(ret_types)};
+//    return table.to_columnar();
+
+#ifdef DEBUG_LOG
+    printPlanTree(plan);    // 以人类可读的方式打印计划树
+#endif
+
+    size_t thread_num = threadNum(plan);                // 线程数
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
     std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
@@ -450,8 +462,8 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     global_mempool.reset();
 
     // 启动所有线程
-    for (int i = 0; i < thread_num; ++i) {
-        int barrier_group = i / Barrier::threads_per_barrier_;    // 每threads_per_barrier_个线程属于一个barrier_group
+    for (size_t i = 0; i < thread_num; ++i) {
+        size_t barrier_group = i / Barrier::threads_per_barrier_;    // 每threads_per_barrier_个线程属于一个barrier_group
 
         if (i == thread_num - 1) {
             [&plan, &shared_manager, &result, &barriers, barrier_group, i]() {
