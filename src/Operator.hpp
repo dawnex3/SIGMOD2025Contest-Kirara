@@ -24,8 +24,10 @@
 
 namespace Contest {
 //#define DEBUG_LOG
+#ifdef SPC__PPC64LE
 #define RANGE_FILTER
 #define HASH_FILTER
+#endif
 
 class Operator {
 public:
