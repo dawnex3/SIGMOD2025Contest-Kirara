@@ -341,7 +341,11 @@ public:
                     (uint8_t *)probe_hks_, sizeof(uint64_t));
             }
             // 调用探测函数，检测哈希值和键值都相等的(Entry*, pos)对，分别存储在build_matches_和probe_matches_中
-            uint32_t n = joinAll();
+            uint32_t n;
+            if (typeid(*right_) == typeid(Scan))
+                n = joinAll();
+            else
+                n = joinAllParallel();
             if (n == 0) continue;
             // 物化最终结果。将匹配的(Entry*, pos)中，左侧的值收集起来，右侧对应的行的值也收集起来
             last_result_.num_rows_ = n;
@@ -390,7 +394,7 @@ public:
                 const int32_t* base = (int32_t*)arg.second;
                 for (size_t i = 0; i < n; ++i) {
                     uint64_t hash = hash_32(base[i]);
-                    uint64_t hk = (hash << 32) | base[i];
+                    uint64_t hk = (hash << 32) | static_cast<uint32_t>(base[i]);
                     *(uint64_t *)target=hk;
                     target += step;
                 }
@@ -414,7 +418,7 @@ public:
                         }
 
                         uint64_t hash = hash_32(key);
-                        uint64_t hk = (hash << 32) | key;
+                        uint64_t hk = (hash << 32) | static_cast<uint32_t>(key);
                         *(uint64_t *)target=hk;
                         target += step;
                     }
@@ -453,7 +457,7 @@ public:
                     build_matches_[found] = entry;              // 记录左表（哈希表）匹配的EntryHeader
                     probe_matches_[found] = cont_.next_probe_;  // 记录右表匹配的行号
                     found ++;
-                    if (found == vec_size_) {   // 本批次已满，保存状态交给下一轮处理
+                    if (__glibc_unlikely(found == vec_size_)) {   // 本批次已满，保存状态交给下一轮处理
                         cont_.last_chain_ = entry->next;
                         if(cont_.last_chain_==nullptr){
                             cont_.next_probe_++;    // 如果本次的哈希链其实已经处理完毕
@@ -497,68 +501,66 @@ public:
 
     /// computes join result into buildMatches and probeMatches
     /// Implementation: optimized for long CPU pipelines
-//    uint32_t joinAllParallel(){
-//        size_t found = 0;
-//        auto followup = cont_.queue_begin_;   // 队列读指针
-//        auto followupWrite = cont_.queue_end_;   // 队列写指针
-//
-//        if (followup == followupWrite) {       // 当循环队列为空的时候
-//            for (size_t i = 0, end = cont_.num_probe_; i < end; ++i) {    // 遍历该批次所有探测元组
-//                auto hash = probe_hashes_[i];
-//                auto entry = shared_.hashmap_.find_chain_tagged(hash);
-//                if (entry != nullptr) {        // 匹配项添加到buildMatches和probeMatches
-//                    if (entry->hash == hash) {
-//                        build_matches_[found] = entry;
-//                        probe_matches_[found] = i;
-//                        found += 1;
-//                    }
-//                    if (entry->next != nullptr) {  // 添加id-entry对到循环队列
-//                        queue_probe_[followupWrite] = i;
-//                        queue_build_[followupWrite] = entry->next;
-//                        followupWrite += 1;
-//                    }
-//                }
-//            }
-//        }
-//
-//        followupWrite %= circular_queue_size_;
-//
-//        while (followup != followupWrite) {          // 消耗直至队列为空
-//            auto remainingSpace = vec_size_ - found;  // 该批次的剩余容量
-//            auto nrFollowups = followup <= followupWrite
-//                                    ? followupWrite - followup
-//                                    : circular_queue_size_ - (followup - followupWrite);  // 队列的大小
-//            // std::cout << "nrFollowups: " << nrFollowups << "\n";
-//            auto fittingElements = std::min((size_t)nrFollowups, remainingSpace);   // fittingElements是所能处理的最大数目
-//            for (size_t j = 0; j < fittingElements; ++j) {
-//                size_t i = queue_probe_[followup];
-//                auto entry = queue_build_[followup];
-//                // followup = (followup + 1) % followupBufferSize;
-//                followup = (followup + 1);
-//                if (followup == circular_queue_size_) followup = 0;
-//                auto hash = probe_hashes_[i];      // 取出队列最前端
-//                if (entry->hash == hash) {
-//                    build_matches_[found] = entry;
-//                    probe_matches_[found++] = i;
-//                }
-//                if (entry->next != nullptr) {  // 向队列尾部添加元素
-//                    queue_probe_[followupWrite] = i;
-//                    queue_build_[followupWrite] = entry->next;
-//                    followupWrite = (followupWrite + 1) % circular_queue_size_;
-//                }
-//            }
-//            if (fittingElements < nrFollowups) {   // 当remainingSpace < nrFollowups时，会在此提前结束该批次。尽管批次可能未满。
-//                // continuation
-//                cont_.queue_end_ = followupWrite;
-//                cont_.queue_begin_ = followup;
-//                return found;
-//            }
-//        }
-//        cont_.next_probe_ = cont_.num_probe_;
-//        cont_.queue_end_ = 0;
-//        cont_.queue_begin_ = 0;
-//        return found;
-//    }
+    uint32_t joinAllParallel(){
+        size_t found = 0;
+        auto followup = cont_.queue_begin_;   // 队列读指针
+        auto followupWrite = cont_.queue_end_;   // 队列写指针
+
+        if (followup == followupWrite) { // 当循环队列为空的时候
+            for (size_t i = 0, end = cont_.num_probe_; i < end; ++i) {    // 遍历该批次所有探测元组
+                auto hk = probe_hks_[i];
+                auto entry = shared_.hashmap_.find_chain_tagged(hk>>32);
+                if (entry != nullptr) {        // 匹配项添加到buildMatches和probeMatches
+                    if (entry->hash_and_key == hk) {
+                        build_matches_[found] = entry;
+                        probe_matches_[found] = i;
+                        found++;
+                    }
+                    if (entry->next != nullptr) {  // 添加id-entry对到循环队列
+                        queue_probe_[followupWrite] = i;
+                        queue_build_[followupWrite] = entry->next;
+                        followupWrite = followupWrite == circular_queue_size_ - 1 ? 0 : followupWrite + 1;
+                        // 这里保证不会绕好几圈，以至覆盖了先前写入的值
+                    }
+                }
+            }
+        }
+
+        while (followup != followupWrite) {          // 消耗直至队列为空
+            auto remainingSpace = vec_size_ - found;  // 该批次的剩余容量
+            auto nrFollowups = followup <= followupWrite
+                                    ? followupWrite - followup
+                                    : circular_queue_size_ - (followup - followupWrite);  // 队列的大小
+            // std::cout << "nrFollowups: " << nrFollowups << "\n";
+            auto fittingElements = std::min((size_t)nrFollowups, remainingSpace);   // fittingElements是所能处理的最大数目
+            for (size_t j = 0; j < fittingElements; ++j) {
+                size_t i = queue_probe_[followup];
+                auto entry = queue_build_[followup];
+                followup = followup == circular_queue_size_ - 1 ? 0 : (followup + 1);
+                auto hk = probe_hks_[i];      // 取出队列最前端
+                if (entry->hash_and_key == hk) {
+                    build_matches_[found] = entry;
+                    probe_matches_[found] = i;
+                    found++;
+                }
+                if (entry->next != nullptr) {  // 向队列尾部添加元素
+                    queue_probe_[followupWrite] = i;
+                    queue_build_[followupWrite] = entry->next;
+                    followupWrite = followupWrite == circular_queue_size_ - 1 ? 0 : (followupWrite + 1);
+                }
+            }
+            if (fittingElements < nrFollowups) {   // 当remainingSpace < nrFollowups时，会在此提前结束该批次。尽管批次可能未满。
+                // continuation
+                cont_.queue_end_ = followupWrite;
+                cont_.queue_begin_ = followup;
+                return found;
+            }
+        }
+        cont_.next_probe_ = cont_.num_probe_;
+        cont_.queue_end_ = 0;
+        cont_.queue_begin_ = 0;
+        return found;
+    }
 
     // join implementation after Peter's suggestions
     uint32_t joinBoncz();
