@@ -485,7 +485,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
                 // 由最后一个线程转移结果
                 if (is_last) result = std::move(result_writer->shared_.output_);
             });
-        }   
+        }
     }
 
     // 等待所有线程结束

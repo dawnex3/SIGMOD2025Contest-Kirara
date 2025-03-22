@@ -11,7 +11,6 @@
 #include <vector>
 #include <iostream>
 #include <fstream>
-#include <list>
 #include "Profiler.hpp"
 #include "SharedState.hpp"
 #include "attribute.h"
@@ -24,10 +23,6 @@
 
 namespace Contest {
 //#define DEBUG_LOG
-#ifdef SPC__PPC64LE
-#define RANGE_FILTER
-#define HASH_FILTER
-#endif
 
 class Operator {
 public:
@@ -36,12 +31,6 @@ public:
     Operator(const Operator&) = delete;
     virtual OperatorResultTable next() = 0;
     virtual size_t resultColumnNum() = 0;
-    virtual void setFilter(size_t col_idx, int32_t max, int32_t min) {
-        // 基于最大最小值的过滤
-    }
-    virtual void setFilter(size_t col_idx, Hashmap &hashmap, bool same_pipeline) {
-        // 基于hashmap的过滤
-    }
     virtual ~Operator() = default;
 };
 
@@ -63,10 +52,6 @@ private:
     size_t vec_in_chunk_;    // 当前扫描块中已处理的批次数
 
     OperatorResultTable last_result_;       // 上一次调用next的返回结果。本次调用修改一些参数就可以返回。
-#ifdef RANGE_FILTER
-    std::map<size_t, std::tuple<int32_t, int32_t>> filters_;     // 基于最小值和最大值的过滤器。map<列号, tuple<最大值, 最小值>>
-    std::vector<int> is_increase_;      // 每个列是否是递增的
-#endif
 
 public:
     // Shared& shared: 所有线程在该Scan节点上的共享状态
@@ -87,9 +72,6 @@ public:
         for(auto column:columns){
             last_result_.columns_.emplace_back(std::make_tuple(column,0,0));
         }
-#ifdef RANGE_FILTER
-        is_increase_.resize(columns.size(),0);
-#endif
     }
 
     size_t resultColumnNum() override{
@@ -97,159 +79,56 @@ public:
     }
 
     OperatorResultTable next() override{
-        while(true){
-            size_t skip_rows;       // 本次调用，相比于上次跳过的行数
-            ProfileGuard profile_guard(global_profiler, "Scan_" + std::to_string(shared_.get_operator_id()));
+        size_t skip_rows;       // 本次调用，相比于上次跳过的行数
+        ProfileGuard profile_guard(global_profiler, "Scan_" + std::to_string(shared_.get_operator_id()));
 
-            if (vec_in_chunk_ == chunk_size_) {     // 如果本块已经处理完，取出新的一块，更新全局状态
-                size_t current_chunk = shared_.pos_.fetch_add(1); // 取出shared_.pos_的旧值表示当前要处理的块，并加上1
-                skip_rows = current_chunk * chunk_size_ * vec_size_ - last_row_;
-                vec_in_chunk_ = 0;
-            } else {    // 如果不取新块，那么前进一个批次的行
-                skip_rows = vec_size_;
-            }
-            last_row_ += skip_rows;
+        if (vec_in_chunk_ == chunk_size_) {     // 如果本块已经处理完，取出新的一块，更新全局状态
+            size_t current_chunk = shared_.pos_.fetch_add(1); // 取出shared_.pos_的旧值表示当前要处理的块，并加上1
+            skip_rows = current_chunk * chunk_size_ * vec_size_ - last_row_;
+            vec_in_chunk_ = 0;
+        } else {    // 如果不取新块，那么前进一个批次的行
+            skip_rows = vec_size_;
+        }
+        last_row_ += skip_rows;
 
-            if(last_row_ >= total_rows_){
-                last_result_.num_rows_ = 0;
-                return last_result_;
-            } else {
-                last_result_.num_rows_ = std::min(total_rows_ - last_row_, vec_size_);
-                // 设置last_result_中的页号行号。Scan给出的列都是ContinuousColumn
-                for(OperatorResultTable::ColumnVariant& column : last_result_.columns_){
-                    // 对于每一列，计算current_row的页码
-                    auto& continuous_column = std::get<OperatorResultTable::ContinuousColumn>(column);
-                    const std::vector<Page *>& pages = std::get<0>(continuous_column)->pages;
-                    uint32_t start_page = std::get<1>(continuous_column);
-                    uint32_t offset_this_page = std::get<2>(continuous_column) + skip_rows;
+        if(last_row_ >= total_rows_){
+            last_result_.num_rows_ = 0;
+            return last_result_;
+        } else {
+            last_result_.num_rows_ = std::min(total_rows_ - last_row_, vec_size_);
+            // 设置last_result_中的页号行号。Scan给出的列都是ContinuousColumn
+            for(OperatorResultTable::ColumnVariant& column : last_result_.columns_){
+                // 对于每一列，计算current_row的页码
+                auto& continuous_column = std::get<OperatorResultTable::ContinuousColumn>(column);
+                const std::vector<Page *>& pages = std::get<0>(continuous_column)->pages;
+                uint32_t start_page = std::get<1>(continuous_column);
+                uint32_t offset_this_page = std::get<2>(continuous_column) + skip_rows;
 
-                    for(uint32_t i=start_page; i<pages.size(); i++){
-                        uint16_t page_rows = getRowCount(pages[i]);
-                        if(page_rows==LONG_STRING_START){
-                            // 如果是LONG STRING的起始页
-                            page_rows=1;
-                        } else if(page_rows==LOGNG_STRING_FOLLOW){
-                            // 如果是LONG STRING的后续页
-                            page_rows=0;
-                        }
-                        if (offset_this_page < page_rows) {
-                            // 如果偏移在当前页范围内，更新页号和页内偏移
-                            std::get<1>(continuous_column) = i;              // 更新为当前页码
-                            std::get<2>(continuous_column) = offset_this_page; // 更新页内偏移
-                            break;
-                        }
-                        offset_this_page -= page_rows; // 跳过当前页
+                for(uint32_t i=start_page; i<pages.size(); i++){
+                    uint16_t page_rows = getRowCount(pages[i]);
+                    if(page_rows==LONG_STRING_START){
+                        // 如果是LONG STRING的起始页
+                        page_rows=1;
+                    } else if(page_rows==LOGNG_STRING_FOLLOW){
+                        // 如果是LONG STRING的后续页
+                        page_rows=0;
                     }
-                }
-                vec_in_chunk_ ++;
-
-#ifdef RANGE_FILTER
-                // 尝试过滤掉该批次。
-                bool is_filtered = false;
-                for (const auto& [col_idx, range] : filters_) {
-                    int32_t max = std::get<0>(range);
-                    int32_t min = std::get<1>(range);
-
-                    // 获取被过滤列的最大值和最小值
-                    auto& filter_column = std::get<OperatorResultTable::ContinuousColumn>(last_result_.columns_[col_idx]);
-                    const std::vector<Page *>& pages = std::get<0>(filter_column)->pages;
-                    uint32_t start_page = std::get<1>(filter_column);
-                    uint32_t offset_this_page = std::get<2>(filter_column);
-                    int32_t col_min = *(getPageData<int32_t>(pages[start_page]) + getNonNullCount(getBitmap(pages[start_page]),offset_this_page));
-                    // 如果已经超过该区间，则终止scan算子
-                    if(col_min > max){
-                        //printf("filter scan %d stop\n", shared_.get_operator_id()-1);
-                        last_result_.num_rows_ = 0;
-                        return last_result_;
-                    }
-
-                    offset_this_page += last_result_.num_rows_ - 1;     // 结束行的偏移
-                    uint16_t page_rows = getRowCount(pages[start_page]);
-                    while (offset_this_page >= page_rows){
-                        offset_this_page -= page_rows; // 跳过当前页
-                        start_page ++;
-                        page_rows = getRowCount(pages[start_page]);
-                    }
-                    int32_t col_max = *(getPageData<int32_t>(pages[start_page]) + getNonNullCount(getBitmap(pages[start_page]),offset_this_page));
-                    // 如果还没到该区间，则取下一个块
-                    if(col_max < min){
-                        //printf("filter scan %d skip\n", shared_.get_operator_id()-1);
-                        is_filtered = true;
+                    if (offset_this_page < page_rows) {
+                        // 如果偏移在当前页范围内，更新页号和页内偏移
+                        std::get<1>(continuous_column) = i;              // 更新为当前页码
+                        std::get<2>(continuous_column) = offset_this_page; // 更新页内偏移
                         break;
                     }
+                    offset_this_page -= page_rows; // 跳过当前页
                 }
-                if(is_filtered){
-                    continue;
-                }
-#endif
-
-                profile_guard.add_input_row_count(last_result_.num_rows_);
-                profile_guard.add_output_row_count(last_result_.num_rows_);
-
-                return last_result_;
             }
+            vec_in_chunk_ ++;
+            profile_guard.add_input_row_count(last_result_.num_rows_);
+            profile_guard.add_output_row_count(last_result_.num_rows_);
+
+            return last_result_;
         }
     }
-
-#ifdef RANGE_FILTER
-    void setFilter(size_t col_idx, int32_t new_max, int32_t new_min) override {
-        // 判断区间是否有效
-        if(new_max<new_min){
-            return;
-        }
-
-        // 判断被过滤的列是否是有序的。
-        if(is_increase_[col_idx]==-1){
-            return;
-        } else if(is_increase_[col_idx]==0){
-            auto& filter_column = std::get<OperatorResultTable::ContinuousColumn>(last_result_.columns_[col_idx]);
-            const Column* col = std::get<0>(filter_column);
-            // 选取filter_column的一些页，通过这些页的首个数据，来判断是否递增
-
-            if(col->pages.size()<10){
-                is_increase_[col_idx]=-1;
-                return;
-            }
-
-            // 如果被过滤的数据范围太狭窄，不考虑
-            int32_t range = *getPageData<int32_t>(col->pages.back()) - *getPageData<int32_t>(col->pages.front());
-            if(range < 100000){
-                is_increase_[col_idx]=-1;
-                return;
-            }
-
-            int32_t last_sample = std::numeric_limits<int32_t>::min();
-            for(size_t i=0;i<col->pages.size();i++){
-                int32_t sample = *getPageData<int32_t>(col->pages[i]);
-                if(sample>=last_sample){
-                    last_sample = sample;
-                } else {
-                    is_increase_[col_idx]=-1;
-                    return;
-                }
-            }
-            is_increase_[col_idx]=1;
-        }
-
-#ifdef DEBUG_LOG
-        printf("range filter @ scan %d col %d\n",shared_.get_operator_id()-1, col_idx);
-#endif
-        // 记录过滤器
-        auto it = filters_.find(col_idx);
-        if (it != filters_.end()) {
-            int32_t old_max, old_min;
-            std::tie(old_max, old_min) = it->second;
-            // 更新: 最大值取二者中的较小值，最小值取二者中的较大值
-            int32_t updated_max = std::min(old_max, new_max);
-            int32_t updated_min = std::max(old_min, new_min);
-            it->second = std::make_tuple(updated_max, updated_min);
-        }
-        else {
-            // 不存在该过滤器，直接插入
-            filters_.emplace(col_idx, std::make_tuple(new_max, new_min));
-        }
-    }
-#endif
 };
 
 
@@ -260,11 +139,6 @@ public:
         std::atomic<size_t> found_{0};             // 哈希表大小
         std::atomic<bool> size_is_set_{false};     // 哈希表大小是否已经设置
         Hashmap hashmap_;
-
-#if defined(RANGE_FILTER) || defined(DEBUG_LOG)
-        std::atomic<int32_t> max_key_{std::numeric_limits<int32_t>::min()};           // 最大值
-        std::atomic<int32_t> min_key_{std::numeric_limits<int32_t>::max()};           // 最小值
-#endif
     };
 
 private:
@@ -313,61 +187,9 @@ private:
     uint32_t *queue_probe_;                 // 探测侧的循环队列，存储行号
     Hashmap::EntryHeader** queue_build_;    // 构建侧的循环队列，指向Entry
 
-#if defined(RANGE_FILTER) || defined(DEBUG_LOG)
-    int32_t local_max_key_{std::numeric_limits<int32_t>::min()};           // 最大值
-    int32_t local_min_key_{std::numeric_limits<int32_t>::max()};           // 最小值
-#endif
-
-#ifdef HASH_FILTER
-    class HashFilter{
-        Hashmap& hashmap_;
-    public:
-        size_t filtered_num_{0};
-        size_t preserved_num_{0};
-        HashFilter(Hashmap& hashmap) : hashmap_(hashmap){}
-
-        inline bool filter(uint32_t hash){
-            Hashmap::EntryHeader *header = hashmap_.find_chain_tagged(hash);
-//            if(header==nullptr){
-//                filtered_num_++;
-//                return true;
-//            } else {
-//                preserved_num_++;
-//                return false;
-//            }
-
-            // 检查哈希值是否相等
-            while(header!=nullptr){
-                if(header->hash==hash){
-                    preserved_num_++;
-                    return false;
-                }
-                header = header->next;
-            }
-            filtered_num_++;
-            return true;
-        }
-
-        inline bool isSelective() const{
-            return (filtered_num_+preserved_num_ < 2000) || (float)filtered_num_/(float)preserved_num_ > 2.0;
-        }
-    };
-
-    std::map<size_t, std::list<HashFilter>> probe_filters_;   // 探测侧哈希过滤器
-    std::map<size_t, bool> probe_filter_store_hash_;  // 探测侧哈希过滤器是否要保存哈希值（将哈希值与键值组合为一个int64）
-    std::vector<size_t> probe_filter_order_;        // 探测侧过滤的顺序
-    bool * filtered_;              // probe_matches_中已被过滤的行
-    uint32_t * filter_preserved_;   // probe_matches_未被过滤的下标
-    OperatorResultTable::InstantiatedColumn probe_keys_;
-
-#endif
-
 #ifdef DEBUG_LOG
-    size_t probe_num_{0};
-    int32_t max_probe_key_{std::numeric_limits<int32_t>::min()};
-    int32_t min_probe_key_{std::numeric_limits<int32_t>::max()};
-    size_t total_output_{0};
-    std::string table_str_;
+    size_t total_output{0};
+    std::string table_str;
 #endif
 
 public:
@@ -403,14 +225,9 @@ public:
 
         // 分配结果表last_result_的内存，设置output_attrs_
         for(auto [col_idx, col_type]:output_attrs){
-            // 如果构建侧的连接键需要输出，那么换成探测侧的连接键来输出。这样方便复用算到的哈希值
-            if(col_idx==left_idx){
-                col_idx = right_idx + left_attrs.size();
-            }
             output_attrs_.push_back(col_idx);
             if(col_type==DataType::INT32){
-                //void* col_buffer = local_allocator.allocate(vec_size*sizeof(int32_t));
-                void* col_buffer = local_allocator.allocate(vec_size*sizeof(uint64_t));
+                void* col_buffer = local_allocator.allocate(vec_size*sizeof(int32_t));
                 last_result_.columns_.emplace_back(std::make_pair(col_type, col_buffer));
             } else {
                 void* col_buffer = local_allocator.allocate(vec_size*sizeof(uint64_t));
@@ -421,17 +238,6 @@ public:
         // 分配循环队列的内存
         queue_probe_ = (uint32_t*)local_allocator.allocate(circular_queue_size_*sizeof(uint32_t));
         queue_build_ = (Hashmap::EntryHeader**)local_allocator.allocate(circular_queue_size_*sizeof(Hashmap::EntryHeader*));
-
-#ifdef HASH_FILTER
-        // 分配过滤器的内存
-        filtered_ = (bool*)local_allocator.allocate(vec_size*sizeof(bool));
-        std::fill_n(filtered_, vec_size, false);
-        filter_preserved_ = (uint32_t*)local_allocator.allocate((vec_size_+1)*sizeof(uint32_t));
-
-        probe_keys_.first = DataType::INT32;
-        probe_keys_.second = local_allocator.allocate(vec_size*sizeof(uint64_t));
-
-#endif
     }
 
     ~Hashjoin() override{
@@ -471,38 +277,14 @@ public:
                     OperatorResultTable::ColumnVariant left_value = left_table.columns_[col_idx];
                     gatherCol<false>(left_value,n,ht_entrys+build_value_offsets_[col_idx],ht_entry_size_);
                 }
-
             }
 
 
             shared_.found_.fetch_add(found);   // 加到所有线程的总found上
-#if defined(RANGE_FILTER) || defined(DEBUG_LOG)
-            int32_t current_max = shared_.max_key_.load(std::memory_order_relaxed);
-            while (local_max_key_ > current_max) {
-                // compare_exchange_weak 尝试将 current_max 替换为 local_max，
-                // 如果当前全局值依然等于 current_max（即未被其他线程修改），则更新成功
-                if (shared_.max_key_.compare_exchange_weak(current_max, local_max_key_, std::memory_order_relaxed)) {
-                    break;
-                }
-                // 如果失败，current_max 已经被自动更新为最新值，继续循环判断
-
-            }
-            int32_t current_min = shared_.min_key_.load(std::memory_order_relaxed);
-            while (local_min_key_ < current_min) {
-                if (shared_.min_key_.compare_exchange_weak(current_min, local_min_key_, std::memory_order_relaxed)) {
-                    break;
-                }
-            }
-#endif
-
             profile_guard.pause();
             current_barrier->wait([&]() {   // 等待所有线程完成计算，确定哈希表大小
                 auto total_found = shared_.found_.load();
                 if (total_found) shared_.hashmap_.setSize(total_found);
-#ifdef DEBUG_LOG
-                // 打印该节点构建侧键值的最大最小值
-                printf("join %d: build_size=%d, build_max_key=%d, build_min_key=%d\n",shared_.get_operator_id()-1,total_found,shared_.max_key_.load(),shared_.min_key_.load());
-#endif
             });
             profile_guard.resume();
             auto total_found = shared_.found_.load();
@@ -518,22 +300,10 @@ public:
                     reinterpret_cast<Hashmap::EntryHeader*>(ht_entrys), n, ht_entry_size_);
             }
             is_build_ = true;
-
-#ifdef RANGE_FILTER
-            // 将范围过滤器下推到探测侧算子
-            right_->setFilter(right_idx_, shared_.max_key_.load(),shared_.min_key_.load());
-#endif
-#ifdef HASH_FILTER
-            // 将哈希过滤器下推到探测侧算子（属于同一条pipeline）
-            right_->setFilter(right_idx_, shared_.hashmap_, true);
-#endif
-
             profile_guard.pause();
             current_barrier->wait(); // 等待所有线程插入哈希表
             profile_guard.resume();
         }
-
-        size_t left_column_num = left_->resultColumnNum();
 
         // 探测阶段
         while (true) {
@@ -544,353 +314,50 @@ public:
                 profile_guard.add_input_row_count(right_result_.num_rows_);
                 cont_.next_probe_ = 0;
                 cont_.num_probe_ = right_result_.num_rows_;
-#ifdef DEBUG_LOG
-                probe_num_ += cont_.num_probe_;
-#endif
                 if (cont_.num_probe_ == 0) {
                     last_result_.num_rows_ = 0;
 #ifdef DEBUG_LOG
                     // 打印该节点输出的总行数
-                    printf("join %d: output_rows=%ld, probe_size=%ld, probe_max_key=%d, probe_min_key=%d\n",shared_.get_operator_id()-1,total_output_,probe_num_,max_probe_key_,min_probe_key_);
-                    //std::cout<<table_str_<<std::endl;
-//                    std::ofstream log("log_false.txt", std::ios::app);
-//                    log << "join "<< shared_.get_operator_id()-1 <<" output rows: " << total_output_ << ", details:\n";
-//                    log << table_str_ <<std::endl;
-//                    log.close();
-
-#ifdef HASH_FILTER
-                    // 打印哈希过滤器的过滤比
-                    for(auto& [out_idx, hash_filters]:probe_filters_) {
-                        for (auto& filter: hash_filters) {
-                            printf(
-                                "hash filter @ join %d col %d: filtered_num=%d, preserved_num=%d\n",
-                                shared_.get_operator_id() - 1,
-                                out_idx,
-                                filter.filtered_num_,
-                                filter.preserved_num_);
-                        }
-                    }
-#endif
+//                    printf("join output rows: %ld, details:\n",total_output);
+//                    std::cout<<table_str<<std::endl;
+                    std::ofstream log("log_false.txt", std::ios::app);
+                    log << "join "<< shared_.get_operator_id()-1 <<" output rows: " << total_output << ", details:\n";
+                    log << table_str <<std::endl;
+                    log.close();
 #endif
                     return last_result_;
                 }
-
-//#ifdef HASH_FILTER
-//                // 计算right_result_中键的哈希值，存储到probe_hashes_数组中
-//                // 检查探测测的键是否需要输出，输出到哪一列
-//                int out_key_idx = -1;
-//                for(size_t out_idx=0;out_idx<output_attrs_.size();out_idx++){
-//                    size_t in_idx = output_attrs_[out_idx];
-//                    if(in_idx >= left_column_num && (in_idx - left_column_num)==right_idx_){
-//                        if(probe_filters_.find(out_idx)!=probe_filters_.end() || out_key_idx==-1){
-//                            out_key_idx = out_idx;
-//                        }
-//                    }
-//                }
-//                if(out_key_idx<0){
-//                    // 不需要输出
-//                    calculateColHash<false>(right_result_.columns_[right_idx_],right_result_.num_rows_,
-//                        (uint8_t *)probe_hashes_,sizeof(Hashmap::hash_t));
-//                } else if(probe_filters_.find(out_key_idx)!=probe_filters_.end()){
-//                    // 探测测的right_idx_需要输出到out_key_idx列
-//                    // 如果该列上面有过滤器，保存键值和哈希值
-//                    auto in_column = std::get<OperatorResultTable::ContinuousColumn>(right_result_.columns_[right_idx_]);
-//                    calculateHashAndFilter<true>(in_column,right_result_.num_rows_,
-//                        (uint8_t *)probe_hashes_,sizeof(Hashmap::hash_t),probe_filters_[out_key_idx],true,(uint8_t*)std::get<1>(probe_keys_),8);
-//                    probe_keys_.first=DataType::INT64;
-//                } else {
-//                    // 如果该列上面没有过滤器，只保存键值
-//                    calculateColHash<true>(right_result_.columns_[right_idx_],right_result_.num_rows_,
-//                        (uint8_t *)probe_hashes_,sizeof(Hashmap::hash_t),(uint8_t*)std::get<1>(probe_keys_),4);
-//                    probe_keys_.first=DataType::INT32;
-//                }
-//#elif
+                // 计算right_result_中键的哈希值，存储到probe_hashes_数组中
                 calculateColHash<false>(right_result_.columns_[right_idx_],right_result_.num_rows_,
                     (uint8_t *)probe_hashes_,sizeof(Hashmap::hash_t));
-//#endif
-
             }
             // 调用探测函数，检测哈希值相等的(Entry*, pos)对，分别存储在build_matches_和probe_matches_中
             uint32_t n = joinAll();
             // 检查(Entry*, pos)对的键值是否确实相等，移除不相等的对
             n = checkKeyEquality(n);
             if (n == 0) continue;
-
-#ifdef HASH_FILTER
-            // 使用哈希表过滤数据。
-            std::fill_n(filtered_, vec_size_, false);   // 清空filtered_
-            bool has_filter = false;
-            // 最先得到的过滤器，最后执行。
-            for (auto it = probe_filter_order_.rbegin(); it != probe_filter_order_.rend(); ++it) {
-                // 必须是探测侧，ContinuousColumn
-                size_t out_idx = *it;
-                size_t in_idx = output_attrs_[out_idx];
-                assert(in_idx >= left_column_num);
-//                if(in_idx-left_column_num==right_idx_) {
-//                    // 不要再过滤连接键了
-//                    continue;
-//                }
-                std::list<HashFilter>& hash_filters = probe_filters_[out_idx];
-                auto in_column = std::get<OperatorResultTable::ContinuousColumn>(right_result_.columns_[in_idx-left_column_num]);
-                auto& out_column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[out_idx]);
-                // 使用哈希表过滤数据，并物化该列。仅对ContinuousColumn过滤
-                gatherAndFilter(in_column,n,(uint8_t*)std::get<1>(out_column),4,probe_matches_,hash_filters,probe_filter_store_hash_[out_idx]);
-                if(hash_filters.empty()) {
-                    // 恢复列类型为INT32
-                    out_column.first = DataType::INT32;
-                } else {
-                    has_filter = true;
-                }
-            }
-
-            if(has_filter){
-                // 删去被过滤的(Entry*, pos)对
-                size_t found=0;
-                for(size_t i=0;i<n;i++){
-                    if(filtered_[i]){
-                        continue;
-                    }
-                    filter_preserved_[found] = i;
-                    build_matches_[found] = build_matches_[i];
-                    probe_matches_[found] = probe_matches_[i];
-                    found++;
-                }
-                n = found;
-                if (n == 0) continue;
-            }
-#endif
-
             // 物化最终结果。将匹配的(Entry*, pos)中，左侧的值收集起来，右侧对应的行的值也收集起来
             last_result_.num_rows_ = n;
-            for(size_t out_idx=0;out_idx<output_attrs_.size();out_idx++){
-                auto column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[out_idx]);
-                size_t in_idx = output_attrs_[out_idx];
-
-#ifdef HASH_FILTER
-                // 如果是探测侧连接键，或者是已经过滤的列，则特殊处理。
-//                if((in_idx - left_column_num)==right_idx_) {
-//                    // 这儿得考虑重复情况。有可能左右侧的键值列都要输出
-//                    // probe_keys_的类型必须与column相同
-//                    if(probe_keys_.first==column.first) {
-//                        gatherCol<true>(probe_keys_,n,(uint8_t*)column.second,
-//                            column.first==DataType::INT32 ? 4 : 8,probe_matches_);
-//                        continue;
-//                    }
-//                    // 要是类型不同，那说明左右侧的键值列都要输出。太麻烦懒得写了。
-//                }
-                if(probe_filters_.find(out_idx)!= probe_filters_.end() && !probe_filters_[out_idx].empty()){
-                    // 如果保存了哈希值，那么步长是8而非4
-                    gatherCol<true>(column,n,(uint8_t*)column.second,
-                        column.first==DataType::INT32 ? 4 : 8,filter_preserved_);
-                    continue;
-                }
-#endif
-
-                if(in_idx < left_column_num){      //如果是构建表
-                    gatherEntry(column,n,build_value_offsets_[in_idx]);
+            size_t curr_out_col = 0;
+            for(size_t col_idx:output_attrs_){
+                size_t left_column_num = left_->resultColumnNum();
+                auto column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[curr_out_col]);
+                curr_out_col++;
+                if(col_idx < left_column_num){      //如果是构建表
+                    gatherEntry(column,n,build_value_offsets_[col_idx]);
                 } else {                            // 如果是探测表
-                    gatherCol<true>(right_result_.columns_[in_idx-left_column_num],n,
+                    gatherCol<true>(right_result_.columns_[col_idx-left_column_num],n,
                         (uint8_t*)column.second,column.first==DataType::INT32 ? 4:8,probe_matches_);
                 }
             }
-
-
             profile_guard.add_output_row_count(n);
 #ifdef DEBUG_LOG
-            total_output_ += n;
-            //table_str_.append(last_result_.toString(false));
+            total_output += n;
+            table_str.append(last_result_.toString(false));
 #endif
             return last_result_;
         }
     }
-
-#ifdef RANGE_FILTER
-    void setFilter(size_t col_idx, int32_t max, int32_t min) override{
-        // 将上层传来的范围过滤算子，交给探测侧算子
-        right_->setFilter(right_idx_, shared_.max_key_.load(),shared_.min_key_.load());
-    }
-#endif
-
-#ifdef HASH_FILTER
-    void setFilter(size_t col_idx, Hashmap &hashmap, bool same_pipeline) override{
-        if(output_attrs_[col_idx]<left_->resultColumnNum()){
-            // 如果被过滤列是构建侧
-            if(typeid(*left_) == typeid(Scan)) {
-                // 如果构建侧是scan，那么结束下推。我的实验表明这种情况很少
-
-            } else {
-                // 否则继续下推
-                left_->setFilter(output_attrs_[col_idx], hashmap, false);   // 已经不是同一条pipeline了
-            }
-        } else {
-            // 如果被过滤列是探测侧
-            if(typeid(*right_) == typeid(Scan)){
-                // 如果探测侧已经是scan，那么停止下推
-                auto it = probe_filters_.find(col_idx);
-#ifdef DEBUG_LOG
-                printf("hash filter probe @ join %d col %d\n",shared_.get_operator_id()-1, col_idx);
-#endif
-                if (it != probe_filters_.end()) {
-                    it->second.emplace_front(hashmap);          // 在开头插入，保持顺序
-                    if(same_pipeline){
-                        probe_filter_store_hash_[col_idx] = true;
-                        // 设置输出列类型为INT64
-                        auto& column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[col_idx]);
-                        column.first = DataType::INT64;
-                    }
-                } else {
-                    probe_filter_order_.emplace_back(col_idx);  // 记录过滤器顺序
-                    probe_filters_.emplace(col_idx, std::list<HashFilter>(1,hashmap));
-                    probe_filter_store_hash_.emplace(col_idx, same_pipeline);
-                    if(same_pipeline){
-                        // 设置输出列类型为INT64
-                        auto& column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[col_idx]);
-                        column.first = DataType::INT64;
-                    }
-                }
-            } else {
-                // 否则继续下推到探测侧
-                right_->setFilter(output_attrs_[col_idx]-left_->resultColumnNum(), hashmap, same_pipeline);
-            }
-        }
-    }
-
-    // 收集的同时进行过滤。
-    void gatherAndFilter(OperatorResultTable::ContinuousColumn input_column, size_t n, uint8_t* col_target, size_t col_step, const uint32_t* idx, std::list<HashFilter>& hash_filters, bool store_hash){
-        // 检查filter是否有效，移除无效的filter
-        hash_filters.remove_if([](const HashFilter& filter) {
-            if(!filter.isSelective()){
-#ifdef DEBUG_LOG
-                printf("filter disable\n");
-#endif
-                return true;
-            }else{
-                return false;
-            }
-        });
-
-        // 如果没有过滤器，直接结束
-        if(hash_filters.empty()){
-            return;
-        }
-
-        if(store_hash) col_step=8;
-
-        // 假设下标数组idx是递增的
-        const Column* col = std::get<0>(input_column);
-        assert(col->type==DataType::INT32);
-        Page *const * current_page = col->pages.data() + std::get<1>(input_column);
-        uint32_t offset = idx[0] + std::get<2>(input_column);
-        for(uint32_t i=0; i<n; i++){
-            if(filtered_[i]){
-                // 如果该行已经被过滤，跳过它
-                col_target += col_step;
-                offset += idx[i+1] - idx[i];
-                continue;
-            }
-            // 定位到idx[i]所在的Page，和页内偏移
-            while(offset >= getRowCount(*current_page)){
-                offset -= getRowCount(*current_page);
-                current_page++;
-            }
-            const uint8_t* bitmap = getBitmap(*current_page);
-
-            // 取出数据
-            int32_t key = NULL_INT32;
-            if(isNotNull(bitmap, offset)){
-                key = *(getPageData<int32_t>(*current_page) + getNonNullCount(bitmap, offset));
-            }
-
-            // 计算哈希值并过滤
-            uint32_t hash = hash_32(key);
-            for(HashFilter& filter:hash_filters){
-                if(filter.filter(hash)){
-                    // 该行无效
-                    filtered_[i]=true;
-                    break;
-                }
-            }
-            if(store_hash){
-                // 将高32位设置为哈希值，低32位设置为key
-                *(uint64_t*)(col_target) = ((uint64_t)hash << 32) | ((uint32_t)key);
-            }else{
-                *(int32_t*)(col_target) = key;
-            }
-
-            col_target += col_step;
-            offset += idx[i+1] - idx[i]; // 假设下标数组idx是递增的
-        }
-    }
-
-    // 计算一列的哈希值，进行过滤，并存储到指定位置。该列必须为INT32
-    template <bool RestoreColumn>   //可选：将列值本身也存储到指定位置
-    void calculateHashAndFilter(OperatorResultTable::ContinuousColumn input_column, size_t n, uint8_t* hash_target, size_t hast_step, std::list<HashFilter>& hash_filters, bool store_hash, uint8_t* col_target=nullptr, size_t col_step=0){
-        // 检查filter是否有效，移除无效的filter
-        hash_filters.remove_if([](const HashFilter& filter) {
-            if(!filter.isSelective()){
-    #ifdef DEBUG_LOG
-                printf("filter disable\n");
-    #endif
-                return true;
-            }else{
-                return false;
-            }
-        });
-
-        const Column* col = std::get<0>(input_column);
-        assert(col->type==DataType::INT32);
-
-        for(size_t i=std::get<1>(input_column); i<col->pages.size(); i++){
-            const Page* current_page = col->pages[i];                       // 要读取的页面
-            const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
-            size_t start_row = i==std::get<1>(input_column) ? std::get<2>(input_column) : 0;  // 本页的起始行
-            size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
-            const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
-
-            for (size_t j=start_row; j<end_row; j++) {
-                int32_t key=NULL_INT32;
-                if (isNotNull(bitmap, j)) {
-                    key=*base;
-                    base++;
-                }
-
-                uint32_t hash = hash_32(key);
-                for(HashFilter& filter:hash_filters){
-                    if(filter.filter(hash)){
-                        // 该行无效，hash设为NULL_HASH
-                        hash = NULL_HASH;
-                        break;
-                    }
-                }
-
-                *(Hashmap::hash_t *)hash_target=hash;
-                hash_target += hast_step;
-                if constexpr (RestoreColumn){
-                    if(store_hash){
-                        // 将高32位设置为哈希值，低32位设置为key
-                        *(uint64_t*)(col_target) = ((uint64_t)hash << 32) | ((uint32_t)key);
-                    }else{
-                        *(int32_t*)(col_target) = key;
-                    }
-                    col_target += col_step;
-    #if defined(RANGE_FILTER) || defined(DEBUG_LOG)
-                    local_max_key_ = std::max(key, local_max_key_);
-                    if(key!=NULL_INT32) local_min_key_ = std::min(key, local_min_key_);
-#endif
-                } else {
-    #ifdef DEBUG_LOG
-                    max_probe_key_ = std::max(key, max_probe_key_);
-                    if(key!=NULL_INT32) min_probe_key_ = std::min(key, min_probe_key_);
-#endif
-                }
-            }
-
-            n -= end_row-start_row;
-            if(n<=0) break;
-        }
-    }
-#endif
-
 
 
     // 计算一列的哈希值，并存储到指定位置。该列必须为INT32
@@ -900,51 +367,17 @@ public:
             using T = std::decay_t<decltype(arg)>;
             if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
                 // 已实例化的列为 std::pair<DataType, void*>，是一块连续的数组
-                assert(arg.first==DataType::INT32 || arg.first==DataType::INT64);
-                if(arg.first==DataType::INT32){
-                    const int32_t* base = (int32_t*)arg.second;
-                    for (size_t i = 0; i < n; ++i) {
-                        assert(base[i]==NULL_INT32 || hash_32(base[i])!=NULL_HASH);
-                        *(Hashmap::hash_t *)hash_target=hash_32(base[i]);
-                        hash_target += hast_step;
-                        if constexpr (RestoreColumn){
-                            *(int32_t*)(col_target) = base[i];
-                            col_target += col_step;
-#if defined(RANGE_FILTER) || defined(DEBUG_LOG)
-                            local_max_key_ = std::max(base[i], local_max_key_);
-                            if(base[i]!=NULL_INT32) local_min_key_ = std::min(base[i], local_min_key_);
-#endif
-                        } else {
-#ifdef DEBUG_LOG
-                            max_probe_key_ = std::max(base[i], max_probe_key_);
-                            if(base[i]!=NULL_INT32) min_probe_key_ = std::min(base[i], min_probe_key_);
-#endif
-                        }
-                    }
-                } else {
-                    const uint64_t* base = (uint64_t*)arg.second;
-                    for (size_t i = 0; i < n; ++i) {
-                        uint32_t hash = base[i] >> 32;
-                        int32_t key = static_cast<int32_t>(base[i] & 0xFFFFFFFFULL);
-                        assert(hash_32(key)==hash);
-                        *(Hashmap::hash_t *)hash_target=hash;
-                        hash_target += hast_step;
-                        if constexpr (RestoreColumn){
-                            *(int32_t*)(col_target) = key;
-                            col_target += col_step;
-#if defined(RANGE_FILTER) || defined(DEBUG_LOG)
-                            local_max_key_ = std::max(key, local_max_key_);
-                            if(key!=NULL_INT32) local_min_key_ = std::min(key, local_min_key_);
-#endif
-                        } else {
-#ifdef DEBUG_LOG
-                            max_probe_key_ = std::max(key, max_probe_key_);
-                            if(key!=NULL_INT32) min_probe_key_ = std::min(key, min_probe_key_);
-#endif
-                        }
+                assert(arg.first==DataType::INT32);
+                const int32_t* base = (int32_t*)arg.second;
+                for (size_t i = 0; i < n; ++i) {
+                    assert(base[i]==NULL_INT32 || hash_32(base[i])!=NULL_HASH);
+                    *(Hashmap::hash_t *)hash_target=hash_32(base[i]);
+                    hash_target += hast_step;
+                    if constexpr (RestoreColumn){
+                        *(int32_t*)(col_target) = base[i];
+                        col_target += col_step;
                     }
                 }
-
             } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn>) {
                 // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>，它存放在多个Page中。
                 const Column* col = std::get<0>(arg);
@@ -970,15 +403,6 @@ public:
                         if constexpr (RestoreColumn){
                             *(int32_t*)(col_target) = key;
                             col_target += col_step;
-#if defined(RANGE_FILTER) || defined(DEBUG_LOG)
-                            local_max_key_ = std::max(key, local_max_key_);
-                            if(key!=NULL_INT32) local_min_key_ = std::min(key, local_min_key_);
-#endif
-                        } else {
-#ifdef DEBUG_LOG
-                            max_probe_key_ = std::max(key, max_probe_key_);
-                            if(key!=NULL_INT32) min_probe_key_ = std::min(key, min_probe_key_);
-#endif
                         }
                     }
 
@@ -1000,31 +424,17 @@ public:
         std::visit([&](auto&& arg) {
             using T = std::decay_t<decltype(arg)>;
             if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
-                assert(arg.first==DataType::INT32 || arg.first==DataType::INT64);
-                if(arg.first==DataType::INT32){
-                    const int32_t* base = (int32_t*)arg.second;
-                    for (uint32_t i = 0; i < n; i++) {
-                        int32_t left_key = *(int32_t*)((uint8_t*)build_matches_[i] + key_offset);
-                        int32_t right_key = base[probe_matches_[i]];
-                        if(left_key == right_key){
-                            build_matches_[found] = build_matches_[i];
-                            probe_matches_[found] = probe_matches_[i];
-                            found++;
-                        }
-                    }
-                } else {
-                    const uint64_t* base = (uint64_t*)arg.second;
-                    for (uint32_t i = 0; i < n; i++) {
-                        int32_t left_key = *(int32_t*)((uint8_t*)build_matches_[i] + key_offset);
-                        int32_t right_key = static_cast<int32_t>(base[probe_matches_[i]] & 0xFFFFFFFFULL);
-                        if(left_key == right_key){
-                            build_matches_[found] = build_matches_[i];
-                            probe_matches_[found] = probe_matches_[i];
-                            found++;
-                        }
+                assert(arg.first==DataType::INT32);
+                const int32_t* base = (int32_t*)arg.second;
+                for (uint32_t i = 0; i < n; i++) {
+                    int32_t left_key = *(int32_t*)((uint8_t*)build_matches_[i] + key_offset);
+                    int32_t right_key = base[probe_matches_[i]];
+                    if(left_key == right_key){
+                        build_matches_[found] = build_matches_[i];
+                        probe_matches_[found] = probe_matches_[i];
+                        found++;
                     }
                 }
-
             } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn>) {
                 // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>。
                 const Column* col = std::get<0>(arg);
@@ -1253,19 +663,19 @@ public:
     LocalVector<TempPage *> unfilled_page_;   // 未满的 Page
 
     ResultWriter(Shared &shared, Operator *child)
-    : shared_{shared}, page_buffers_(shared.output_.columns.size()),
-    child_(child),
-    unfilled_page_() {
-        for (size_t i = 0; i < shared.output_.columns.size(); ++i) {
-            if (shared.output_.columns[i].type == DataType::INT32) {
-                unfilled_page_.push_back(new (local_allocator.allocate(sizeof (TempIntPage))) TempIntPage);
-            } else if (shared.output_.columns[i].type == DataType::VARCHAR) {
-                unfilled_page_.push_back(new (local_allocator.allocate(sizeof (TempStringPage))) TempStringPage);
-            } else {
-                throw std::runtime_error("Unsupported data type");
+        : shared_{shared}, page_buffers_(shared.output_.columns.size()),
+          child_(child),
+          unfilled_page_() {
+            for (size_t i = 0; i < shared.output_.columns.size(); ++i) {
+                if (shared.output_.columns[i].type == DataType::INT32) {
+                    unfilled_page_.push_back(new (local_allocator.allocate(sizeof (TempIntPage))) TempIntPage);
+                } else if (shared.output_.columns[i].type == DataType::VARCHAR) {
+                    unfilled_page_.push_back(new (local_allocator.allocate(sizeof (TempStringPage))) TempStringPage);
+                } else {
+                    throw std::runtime_error("Unsupported data type");
+                }
             }
-        }
-    }
+          }
 
     void next(){
         size_t found = 0;
@@ -1280,7 +690,7 @@ public:
             // 将每一列写入page_buffers_
             for(size_t i=0; i<child_result.columns_.size(); i++){
                 auto from_column = std::get<OperatorResultTable::InstantiatedColumn>(child_result.columns_[i]);
-                auto rows = child_result.num_rows_; 
+                auto rows = child_result.num_rows_;
                 LocalVector<Page*>& pages = page_buffers_[i];
 
                 if(from_column.first==DataType::INT32){
