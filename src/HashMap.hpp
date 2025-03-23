@@ -216,7 +216,35 @@ void inline Hashmap::clear() {
         entries[i].store(end(), std::memory_order_relaxed);
     }
 }
+#include <immintrin.h>
+#ifdef __AVX2__
+inline __m256i hash_32_simd(__m256i keys, uint32_t seed =  4000932304) {
+    const __m256i c1 = _mm256_set1_epi32(0xcc9e2d51);
+    const __m256i c2 = _mm256_set1_epi32(0x1b873593);
+    const __m256i seed_vec = _mm256_set1_epi32(seed);
+    const __m256i five = _mm256_set1_epi32(5);
+    const __m256i mix_constant = _mm256_set1_epi32(0xe6546b64);
 
+    // 处理流程
+    __m256i k = _mm256_mullo_epi32(keys, c1);
+    k = _mm256_or_si256(_mm256_slli_epi32(k, 15), _mm256_srli_epi32(k, 17));
+    k = _mm256_mullo_epi32(k, c2);
+
+    __m256i hash = _mm256_xor_si256(seed_vec, k);
+    hash = _mm256_or_si256(_mm256_slli_epi32(hash, 13), _mm256_srli_epi32(hash, 19));
+    hash = _mm256_add_epi32(_mm256_mullo_epi32(hash, five), mix_constant);
+
+    // Finalization mix
+    hash = _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 16));
+    hash = _mm256_mullo_epi32(hash, _mm256_set1_epi32(0x85ebca6b));
+    hash = _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 13));
+    hash = _mm256_mullo_epi32(hash, _mm256_set1_epi32(0xc2b2ae35));
+    hash = _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 16));
+
+    return hash;
+}
+
+#endif
 inline uint32_t rotl32(uint32_t x, int8_t r ) {
     return (x << r) | (x >> (32 - r));
 }

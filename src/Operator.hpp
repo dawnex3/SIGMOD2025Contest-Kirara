@@ -383,7 +383,126 @@ public:
             return last_result_;
         }
     }
+#include <immintrin.h>
+#ifdef __AVX2__
+    // 计算一列的哈希值，与该列本身一起组成uint64，存储到指定位置
+    
+    void calculateColHash(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* target, size_t step){
+        std::visit([&](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            printf("111\n");
+            if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
+                // 已实例化的列为 std::pair<DataType, void*>，是一块连续的数组
+                assert(arg.first == DataType::INT32);
+                const int32_t* base = static_cast<int32_t*>(arg.second);
+                size_t i = 0;
+                for (; i + 7 < n; i += 8) {
+                    // 加载8个int32
+                    __m256i keys = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(base + i));
+                
+                    // 向量化哈希计算
+                    __m256i hashes = hash_32_simd(keys);
+                
+                    // 将向量存储到临时数组
+                    alignas(32) uint32_t key_arr[8];
+                    alignas(32) uint32_t hash_arr[8];
+                    _mm256_store_si256((__m256i*)key_arr, keys);
+                    _mm256_store_si256((__m256i*)hash_arr, hashes);
 
+                    // 现在可以循环处理数组
+                    for (int j = 0; j < 8; ++j) {
+                        uint64_t hk = (static_cast<uint64_t>(hash_arr[j]) << 32) | key_arr[j];
+                        *(uint64_t*)target = hk;
+                        target += step;
+                    }
+                }
+                // 处理剩余元素（标量处理）
+                for (; i < n; ++i) {
+                    uint64_t hash = hash_32(base[i]);
+                    uint64_t hk = (hash << 32) | static_cast<uint32_t>(base[i]);
+                    *(uint64_t *)target = hk;
+                    target += step;
+                }
+            } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn>) {
+                // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>，它存放在多个Page中。
+                const Column* col = std::get<0>(arg);
+                assert(col->type==DataType::INT32);
+                size_t processed = 0; 
+                size_t remaining = n;  
+
+            for (size_t i = std::get<1>(arg); i < col->pages.size(); i++) {
+                const Page* current_page = col->pages[i];
+                const uint8_t* bitmap = getBitmap(current_page);
+                size_t start_row = (i == std::get<1>(arg)) ? std::get<2>(arg) : 0;
+                size_t end_row = std::min((size_t)getRowCount(current_page), start_row + remaining);
+                const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
+
+                size_t j = start_row;
+                while (j < end_row && processed < n ) {
+                    if((j % 8 == 0) && (j + 8 <= end_row) && (processed + 8 <= n)){
+                    size_t byte_idx = j / 8;
+                    uint8_t bitmap_byte = bitmap[byte_idx];
+
+                    // 加载8个INT32值（可能包含空值）
+                    __m256i keys = _mm256_loadu_si256((__m256i*)base);
+
+                    // 生成空值掩码（高位到低位）
+                    const __m256i null_mask = _mm256_set1_epi32(NULL_INT32);
+                    const __m256i mask = _mm256_set_epi32(
+                        (bitmap_byte & 0x80) ? 0 : -1,  // 第7个元素
+                        (bitmap_byte & 0x40) ? 0 : -1,  
+                        (bitmap_byte & 0x20) ? 0 : -1,
+                        (bitmap_byte & 0x10) ? 0 : -1,
+                        (bitmap_byte & 0x08) ? 0 : -1,
+                        (bitmap_byte & 0x04) ? 0 : -1,
+                        (bitmap_byte & 0x02) ? 0 : -1,
+                        (bitmap_byte & 0x01) ? 0 : -1   // 第0个元素
+                    );
+
+                    // 替换空值
+                    keys = _mm256_blendv_epi8(keys, null_mask, mask);
+
+                    // 计算哈希
+                    __m256i hashes = hash_32_simd(keys);
+        
+                    // 将向量存储到临时数组
+                    alignas(32) uint32_t key_arr[8];
+                    alignas(32) uint32_t hash_arr[8];
+                    _mm256_store_si256((__m256i*)key_arr, keys);
+                    _mm256_store_si256((__m256i*)hash_arr, hashes);
+
+                    // 现在可以循环处理数组
+                    for (int j = 0; j < 8; ++j) {
+                        uint64_t hk = (static_cast<uint64_t>(hash_arr[j]) << 32) | key_arr[j];
+                        *(uint64_t*)target = hk;
+                        target += step;
+                    }
+
+                     // 更新指针和计数器
+                    base += __builtin_popcount(bitmap_byte);  // 按非空值数量移动
+                    processed += 8;
+                    j += 8;
+                    }else{
+                        int32_t key = NULL_INT32;
+                        if (isNotNull(bitmap, j)) {
+                            key = *base;
+                            base++;
+                        }
+                        uint64_t hash = hash_32(key);
+                        uint64_t hk = (hash << 32) | static_cast<uint32_t>(key);    // 千万注意，不能写成(hash << 32) | key，会发生符号扩展
+                        *(uint64_t *)target=hk;
+                        target += step;
+                        processed++;
+                        j++;
+                    }
+                }
+                remaining = n - processed;
+                if (remaining <= 0) break;
+            }
+        }
+    }, input_column);
+}
+#else
     // 计算一列的哈希值，与该列本身一起组成uint64，存储到指定位置
     void calculateColHash(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* target, size_t step){
         std::visit([&](auto&& arg) {
@@ -429,8 +548,7 @@ public:
             }
         }, input_column);
     }
-
-
+#endif
     // 收集build_matches_中的值，并存储到指定的InstantiatedColumn中
     void gatherEntry(OperatorResultTable::InstantiatedColumn output_column, uint32_t n, size_t offset){
         if(output_column.first==DataType::INT32){
