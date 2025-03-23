@@ -10,14 +10,14 @@ public:
     using hash_t = uint32_t;
 
     size_t capacity = 0;
-    class EntryHeader
+    struct EntryHeader
     /// Header for hashtable entries
     {
-    public:
         EntryHeader* next;
-        uint64_t hash_and_key;
-        EntryHeader(EntryHeader* n, uint64_t hk) : next(n), hash_and_key(hk) { }
-        inline hash_t getHash() {return static_cast<hash_t>(hash_and_key>>32);}
+        hash_t hash;
+        uint32_t key;
+        EntryHeader(EntryHeader* n, hash_t hash_, uint32_t key_) : next(n), hash(hash_), key(key_) { }
+        inline hash_t getHash() {return hash;}
         // payload data follows this header
     };
 
@@ -179,7 +179,7 @@ template <bool concurrentInsert>
 void inline Hashmap::insertAll(EntryHeader* first, size_t n, size_t step) {
     EntryHeader* e = first;
     for (size_t i = 0; i < n; ++i) {
-        insert<concurrentInsert>(e, static_cast<hash_t>(e->hash_and_key >> 32));
+        insert<concurrentInsert>(e, static_cast<hash_t>(e->hash));
         e = reinterpret_cast<EntryHeader*>(reinterpret_cast<uint8_t*>(e) + step);
     }
 }
@@ -189,7 +189,7 @@ void inline Hashmap::insertAll_tagged(EntryHeader* first, size_t n,
     size_t step) {
     EntryHeader* e = first;
     for (size_t i = 0; i < n; ++i) {
-        insert_tagged<concurrentInsert>(e, static_cast<hash_t>(e->hash_and_key >> 32));
+        insert_tagged<concurrentInsert>(e, static_cast<hash_t>(e->hash));
         e = reinterpret_cast<EntryHeader*>(reinterpret_cast<uint8_t*>(e) + step);
     }
 }
