@@ -436,7 +436,7 @@ public:
                     const Page* current_page = col->pages[i];
                     size_t start_row = (i == std::get<1>(arg)) ? std::get<2>(arg) : 0;
                     size_t end_row = std::min((size_t)getRowCount(current_page), start_row + remaining);
-                    if (true || __glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
+                    if (__glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
 //                        printf("unlikely! %d %d\n", getNonNullCount(current_page), getRowCount(current_page));
                         const uint8_t* bitmap = getBitmap(current_page);
                         const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
@@ -541,7 +541,7 @@ public:
     }
 #else
     // 计算一列的哈希值，与该列本身一起组成uint64，存储到指定位置
-    void calculateColHash(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* target, size_t step){
+    void calculateColHash(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* target, uint8_t* target_keys, size_t step){
         std::visit([&](auto&& arg) {
             using T = std::decay_t<decltype(arg)>;
             if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
@@ -549,10 +549,10 @@ public:
                 assert(arg.first==DataType::INT32);
                 const int32_t* base = (int32_t*)arg.second;
                 for (size_t i = 0; i < n; ++i) {
-                    uint64_t hash = hash_32(base[i]);
-                    uint64_t hk = (hash << 32) | static_cast<uint32_t>(base[i]);
-                    *(uint64_t *)target=hk;
+                    *(uint32_t *)target= hash_32(base[i]);
+                    *(uint32_t *)target_keys = base[i];
                     target += step;
+                    target_keys += step;
                 }
             } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn>) {
                 // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>，它存放在多个Page中。
@@ -573,10 +573,11 @@ public:
                             base++;
                         }
 
-                        uint64_t hash = hash_32(key);
-                        uint64_t hk = (hash << 32) | static_cast<uint32_t>(key);    // 千万注意，不能写成(hash << 32) | key，会发生符号扩展
-                        *(uint64_t *)target=hk;
+                        uint32_t hash = hash_32(key);
+                        *(uint32_t *)target=hash;
+                        *(uint32_t *)target_keys=key;
                         target += step;
+                        target_keys += step;
                     }
                     n -= end_row-start_row;
                     if(n<=0) break;
