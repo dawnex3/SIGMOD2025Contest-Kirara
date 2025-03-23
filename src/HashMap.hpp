@@ -1,6 +1,7 @@
 #include "atomic"
 #include "stdlib.h"
 #include "assert.h"
+#include "hardware.h"
 
 namespace Contest {
 #define NULL_HASH (1642857263)  // 这是NULL_INT32算出的哈希值（祈祷它不会发生碰撞）
@@ -216,8 +217,10 @@ void inline Hashmap::clear() {
         entries[i].store(end(), std::memory_order_relaxed);
     }
 }
+#ifdef SPC__SUPPORTS_AVX2
 #include <immintrin.h>
-#ifdef __AVX2__
+#define SIMD_SIZE 8
+#define INIT_MACRO(X) X,X,X,X,X,X,X,X
 inline __m256i hash_32_simd(__m256i keys, uint32_t seed =  4000932304) {
     const __m256i c1 = _mm256_set1_epi32(0xcc9e2d51);
     const __m256i c2 = _mm256_set1_epi32(0x1b873593);
@@ -243,8 +246,53 @@ inline __m256i hash_32_simd(__m256i keys, uint32_t seed =  4000932304) {
 
     return hash;
 }
-
+#else
+#ifdef SPC__SUPPORTS_AVX || SPC__SUPPORTS_NEON || SPC__SUPPORTS_VSX || SPC__SUPPORTS_VMX
+#define SIMD_SIZE 4
+#define INIT_MACRO(X) X,X,X,X
 #endif
+#endif
+
+#ifdef SIMD_SIZE
+typedef uint32_t vu32 __attribute__((__vector_size__(sizeof(uint32_t) * SIMD_SIZE)));
+static inline vu32 rotl32(vu32 x, int r) {
+    // 利用向量运算进行移位操作，r 必须是常数或标量
+    return (x << r) | (x >> (32 - r));
+}
+
+// 向量版 fmix32 函数，用于最终混合散列值
+static inline vu32 fmix32(vu32 h) {
+    h ^= (h >> 16);
+    h *= 0x85ebca6b;  // 使用常量初始化的向量，所有元素均为 0x85ebca6b
+    h ^= (h >> 13);
+    h *= 0xc2b2ae35;
+    h ^= (h >> 16);
+    return h;
+}
+
+// 向量版 MurMurHash3：同时处理 8 个 key
+static inline vu32 hash_32(vu32 key, vu32 seed) {
+    key *= 0xcc9e2d51;
+    key = rotl32(key, 15);
+    key *= 0x1b87359;
+
+    seed ^= key;
+    seed = rotl32(seed, 13);
+    seed = seed * 5 + 0xe6546b64;
+
+    return fmix32(seed);
+}
+
+// 示例函数：对 8 个 key 计算 hash，并将结果存入数组
+void inline compute_hashes(const uint32_t *keys, uint32_t *hashes) {
+    // 统一设置种子，所有分量均为同一个值（例如 4000932304）
+    vu32 seed = {INIT_MACRO(4000932304U)};
+//    auto* aligned_hashes = reinterpret_cast<vu32*>(__builtin_assume_aligned(hashes, 32));
+//    *aligned_hashes = hash_32(*reinterpret_cast<const vu32*>(keys), seed);
+    *reinterpret_cast<vu32*>(hashes) = hash_32(*reinterpret_cast<const vu32*>(keys), seed);
+}
+#endif
+
 inline uint32_t rotl32(uint32_t x, int8_t r ) {
     return (x << r) | (x >> (32 - r));
 }

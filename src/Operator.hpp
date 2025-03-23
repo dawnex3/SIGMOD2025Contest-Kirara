@@ -386,10 +386,10 @@ public:
             return last_result_;
         }
     }
+
+#ifdef SPC__SUPPORTS_AVX2
 #include <immintrin.h>
-#ifdef __AVX2__
-    // 计算一列的哈希值，与该列本身一起组成uint64，存储到指定位置
-    
+    // 计算一列的哈希值，与该列本身一起组成uint64，存储到指定位
     void calculateColHash(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* target, uint8_t* target_keys, size_t step){
         std::visit([&](auto&& arg) {
             using T = std::decay_t<decltype(arg)>;
@@ -434,66 +434,103 @@ public:
 
                 for (size_t i = std::get<1>(arg); i < col->pages.size(); i++) {
                     const Page* current_page = col->pages[i];
-                    const uint8_t* bitmap = getBitmap(current_page);
                     size_t start_row = (i == std::get<1>(arg)) ? std::get<2>(arg) : 0;
                     size_t end_row = std::min((size_t)getRowCount(current_page), start_row + remaining);
-                    const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
-                    size_t j = start_row;
-                    while (j < end_row && processed < n ) {
-                        if((j % 8 == 0) && (j + 8 <= end_row) && (processed + 8 <= n)){
-                            size_t byte_idx = j / 8;
-                            uint8_t bitmap_byte = bitmap[byte_idx];
-                            int number_of_one = __builtin_popcount(bitmap_byte);
-                            __m256i keys;
-                            if(number_of_one == 8){
-                                keys = _mm256_loadu_si256((__m256i*)base);
-                                base = base+8;
-                            }else{
-                                // 步骤1：将位图转换为有效位置掩码
-                                uint32_t temp_keys[8];
-                                for (int k = 0; k < 8; k++) {
-                                    if (isNotNull(bitmap, j+k)) {
-                                        temp_keys[k]=*base;
-                                        base++;
-                                    }else{
-                                        temp_keys[k]=static_cast<uint32_t>(NULL_INT32);
+                    if (true || __glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
+//                        printf("unlikely! %d %d\n", getNonNullCount(current_page), getRowCount(current_page));
+                        const uint8_t* bitmap = getBitmap(current_page);
+                        const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
+                        size_t j = start_row;
+                        while (j < end_row && processed < n ) {
+                            if((j % 8 == 0) && (j + 8 <= end_row) && (processed + 8 <= n)){
+                                size_t byte_idx = j / 8;
+                                uint8_t bitmap_byte = bitmap[byte_idx];
+                                int number_of_one = __builtin_popcount(bitmap_byte);
+                                __m256i keys;
+                                if(number_of_one == 8){
+                                    keys = _mm256_loadu_si256((__m256i*)base);
+                                    base = base+8;
+                                }else{
+                                    // 步骤1：将位图转换为有效位置掩码
+                                    uint32_t temp_keys[8];
+                                    for (int k = 0; k < 8; k++) {
+                                        if (isNotNull(bitmap, j+k)) {
+                                            temp_keys[k]=*base;
+                                            base++;
+                                        }else{
+                                            temp_keys[k]=static_cast<uint32_t>(NULL_INT32);
+                                        }
+                                        // 步骤2：加载到SIMD寄存器
+                                        keys = _mm256_loadu_si256(reinterpret_cast<__m256i*>(temp_keys));
                                     }
-                                    // 步骤2：加载到SIMD寄存器
-                                    keys = _mm256_loadu_si256(reinterpret_cast<__m256i*>(temp_keys));
                                 }
-                            }
 
-                            // 计算哈希
-                            __m256i hashes = hash_32_simd(keys);
+                                // 计算哈希
+                                __m256i hashes = hash_32_simd(keys);
 
-                            // 将向量存储到临时数组
-                            alignas(32) uint32_t hash_arr[8];
-                            alignas(32) uint32_t key_arr[8];
-                            _mm256_store_si256((__m256i*)hash_arr, hashes);
-                            _mm256_store_si256((__m256i*)key_arr, keys);
+                                // 将向量存储到临时数组
+                                alignas(32) uint32_t hash_arr[8];
+                                alignas(32) uint32_t key_arr[8];
+                                _mm256_store_si256((__m256i*)hash_arr, hashes);
+                                _mm256_store_si256((__m256i*)key_arr, keys);
 
-                            // 现在可以循环处理数组
-                            for (int k = 0; k < 8; ++k) {
-                                *(uint32_t*)target = hash_arr[k];
-                                *(uint32_t*)(target_keys) = key_arr[k];
+                                // 现在可以循环处理数组
+                                for (int k = 0; k < 8; ++k) {
+                                    *(uint32_t*)target = hash_arr[k];
+                                    *(uint32_t*)(target_keys) = key_arr[k];
+                                    target += step;
+                                    target_keys += step;
+                                }
+                                processed += 8;
+                                j += 8;
+                            }else{
+                                int32_t key = NULL_INT32;
+                                if (isNotNull(bitmap, j)) {
+                                    key = *base;
+                                    base++;
+                                }
+                                uint32_t hash = hash_32(key);
+                                *(uint32_t*)target = hash;
+                                *(uint32_t*)(target_keys) = key;
                                 target += step;
                                 target_keys += step;
+                                processed++;
+                                j++;
                             }
-                            processed += 8;
-                            j += 8;
-                        }else{
-                            int32_t key = NULL_INT32;
-                            if (isNotNull(bitmap, j)) {
-                                key = *base;
-                                base++;
+                        }
+                    } else {
+                        const int32_t* base = getPageData<int32_t>(current_page) + start_row;
+                        size_t j = start_row;
+                        while (j < end_row && processed < n) {
+                            if((j % 8 == 0) && (j + 8 <= end_row) && (processed + 8 <= n)){
+                                __m256i keys = _mm256_loadu_si256((__m256i*)base);// number_of_one == 8
+                                base = base+8;
+                                // 计算哈希
+                                __m256i hashes = hash_32_simd(keys);
+                                // 将向量存储到临时数组
+                                alignas(32) uint32_t hash_arr[8];
+                                alignas(32) uint32_t key_arr[8];
+                                _mm256_store_si256((__m256i*)hash_arr, hashes);
+                                _mm256_store_si256((__m256i*)key_arr, keys);
+                                // 现在可以循环处理数组
+                                for (int k = 0; k < 8; ++k) {
+                                    *(uint32_t*)target = hash_arr[k];
+                                    *(uint32_t*)(target_keys) = key_arr[k];
+                                    target += step;
+                                    target_keys += step;
+                                }
+                                processed += 8;
+                                j += 8;
+                            }else{
+                                int32_t key = *base++;
+                                uint32_t hash = hash_32(key);
+                                *(uint32_t*)target = hash;
+                                *(uint32_t*)(target_keys) = key;
+                                target += step;
+                                target_keys += step;
+                                processed++;
+                                j++;
                             }
-                            uint32_t hash = hash_32(key);
-                            *(uint32_t*)target = hash;
-                            *(uint32_t*)(target_keys) = key;
-                            target += step;
-                            target_keys += step;
-                            processed++;
-                            j++;
                         }
                     }
                     remaining = n - processed;
