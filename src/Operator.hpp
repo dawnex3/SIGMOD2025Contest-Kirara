@@ -508,39 +508,39 @@ public:
                             }
                         }
                     } else {
-                        const int32_t* base = getPageData<int32_t>(current_page) + start_row;
-                        size_t j = start_row;
-                        while (j < end_row && processed < n) {
-                            if((j % 8 == 0) && (j + 8 <= end_row) && (processed + 8 <= n)){
-                                __m256i keys = _mm256_loadu_si256((__m256i*)base);// number_of_one == 8
-                                base = base+8;
-                                // 计算哈希
-                                __m256i hashes = hash_32_simd(keys);
-                                // 将向量存储到临时数组
-                                alignas(32) uint32_t hash_arr[8];
-                                alignas(32) uint32_t key_arr[8];
-                                _mm256_store_si256((__m256i*)hash_arr, hashes);
-                                _mm256_store_si256((__m256i*)key_arr, keys);
-                                // 现在可以循环处理数组
-                                for (int k = 0; k < 8; ++k) {
-                                    *(uint32_t*)target = hash_arr[k];
-                                    *(uint32_t*)(target_keys) = key_arr[k];
-                                    target += step;
-                                    target_keys += step;
-                                }
-                                processed += 8;
-                                j += 8;
-                            }else{
-                                int32_t key = *base++;
-                                uint32_t hash = hash_32(key);
-                                *(uint32_t*)target = hash;
-                                *(uint32_t*)(target_keys) = key;
-                                target += step;
-                                target_keys += step;
-                                processed++;
-                                j++;
-                            }
-                        }
+//                        const int32_t* base = getPageData<int32_t>(current_page) + start_row;
+//                        size_t j = start_row;
+//                        while (j < end_row && processed < n) {
+//                            if((j % 8 == 0) && (j + 8 <= end_row) && (processed + 8 <= n)){
+//                                __m256i keys = _mm256_loadu_si256((__m256i*)base);// number_of_one == 8
+//                                base = base+8;
+//                                // 计算哈希
+//                                __m256i hashes = hash_32_simd(keys);
+//                                // 将向量存储到临时数组
+//                                alignas(32) uint32_t hash_arr[8];
+//                                alignas(32) uint32_t key_arr[8];
+//                                _mm256_store_si256((__m256i*)hash_arr, hashes);
+//                                _mm256_store_si256((__m256i*)key_arr, keys);
+//                                // 现在可以循环处理数组
+//                                for (int k = 0; k < 8; ++k) {
+//                                    *(uint32_t*)target = hash_arr[k];
+//                                    *(uint32_t*)(target_keys) = key_arr[k];
+//                                    target += step;
+//                                    target_keys += step;
+//                                }
+//                                processed += 8;
+//                                j += 8;
+//                            }else{
+//                                int32_t key = *base++;
+//                                uint32_t hash = hash_32(key);
+//                                *(uint32_t*)target = hash;
+//                                *(uint32_t*)(target_keys) = key;
+//                                target += step;
+//                                target_keys += step;
+//                                processed++;
+//                                j++;
+//                            }
+//                        }
                     }
                     remaining = n - processed;
                     if (remaining <= 0) break;
