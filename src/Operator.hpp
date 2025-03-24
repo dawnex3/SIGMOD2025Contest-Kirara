@@ -388,7 +388,6 @@ public:
     }
 
 #ifdef SIMD_SIZE
-#include <immintrin.h>
     // 计算一列的哈希值，与该列本身一起组成uint64，存储到指定位
     template <bool targetDense>
     void calculateColHash(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* target, uint8_t* target_keys, size_t step){
