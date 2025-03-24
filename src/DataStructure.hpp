@@ -526,7 +526,7 @@ void gatherContinuousCol(OperatorResultTable::ContinuousColumn input_column, siz
             const Page* current_page = col->pages[i];                       // 要读取的页面
             size_t start_row = i==std::get<1>(input_column) ? std::get<2>(input_column) : 0;  // 本页的起始行
             size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
-            if (__glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
+            if (true || __glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
                 const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
                 const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
 
@@ -569,7 +569,7 @@ void gatherContinuousCol(OperatorResultTable::ContinuousColumn input_column, siz
                 const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
                 size_t start_row = i==std::get<1>(input_column) ? std::get<2>(input_column) : 0;  // 本页的起始行
                 size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
-                if (__glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
+                if (true || __glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
                     const char* base = getPageData<char>(current_page);             // 本页数据的起始指针
                     const uint16_t* current_offset = getVarcharOffset(current_page) + getNonNullCount(bitmap, start_row);  // 当前字符串的结尾的偏移量
                     uint16_t last_offset = getNonNullCount(bitmap, start_row)==0 ? 0 : *(current_offset-1);                // 当前字符串的开头的偏移量
@@ -631,7 +631,7 @@ void gatherContinuousColWithIndex(OperatorResultTable::ContinuousColumn input_co
                 offset -= cur_page_row_num;
                 cur_page_row_num = getRowCount(*++current_page);
             }
-            if (__glibc_unlikely(getNonNullCount(*current_page) != getRowCount(*current_page))){
+            if (true || __glibc_unlikely(getNonNullCount(*current_page) != getRowCount(*current_page))){
                 if (prev_current_page != current_page){
                     bitmap = getBitmap(*current_page);
                     nonnull_count = getNonNullCount(bitmap, offset);
