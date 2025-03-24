@@ -1,5 +1,8 @@
 # Announcements
 
+### 2025-03-24
+  - We are currently experiencing problems with the IBM machine. We are working on restoring the machine.
+
 ### 2025-03-18
   - With this pull request, we will evaluate all queries in the benchmark.
   - Several people asked what to expect in the final evaluation:
