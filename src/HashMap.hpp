@@ -5,6 +5,18 @@
 
 namespace Contest {
 #define NULL_HASH (1642857263)  // 这是NULL_INT32算出的哈希值（祈祷它不会发生碰撞）
+#if defined(SPC__SUPPORTS_AVX2) || defined(SPC__SUPPORTS_AVX) || \
+    defined(SPC__SUPPORTS_NEON) || defined(SPC__SUPPORTS_VSX) || \
+    defined(SPC__SUPPORTS_VMX)
+#define SIMD_SIZE 8
+#define INIT_MACRO(X) X,X,X,X,X,X,X,X
+typedef uint32_t v8u32 __attribute__((__vector_size__(sizeof(uint32_t) * SIMD_SIZE)));
+typedef uint64_t v8u64 __attribute__((__vector_size__(sizeof(uintptr_t) * SIMD_SIZE)));
+struct v8u64M {
+    v8u64 vec;
+    uint8_t mask;
+};
+#endif
 
 class Hashmap {
 public:
@@ -28,7 +40,7 @@ public:
     /// Uses pointer tagging as a filter to quickly determine whether hash is
     /// contained
     inline EntryHeader* find_chain_tagged(hash_t hash);
-    //inline Vec8uM find_chain_tagged(Vec8u hashes);
+    //inline v8u64M find_chain_tagged(v8u64 hashes);
     /// Insert entry into chain for the given hash
     template <bool concurrentInsert = true>
     inline void insert(EntryHeader* entry, hash_t hash);
@@ -47,6 +59,11 @@ public:
     /// Removes all elements from the hashtable
     inline void clear();
 
+#ifdef SIMD_SIZE
+    static inline v8u64 tag(v8u32 p);
+    inline v8u64 find_chain_tagged(v8u32 hashes);
+#endif
+
     std::atomic<EntryHeader*>* entries = nullptr;
 
     hash_t mask;      // mask 用于将任意哈希值映射到桶数组的索引范围内，即0~capacity-1
@@ -62,7 +79,7 @@ public:
 private:
     inline Hashmap::EntryHeader* ptr(Hashmap::EntryHeader* p);
     inline ptr_t tag(hash_t p);
-    //inline Vec8u tag(Vec8u p);
+    //inline v8u64 tag(v8u64 p);
     inline Hashmap::EntryHeader* update(Hashmap::EntryHeader* old,
         Hashmap::EntryHeader* p, hash_t hash);
 };
@@ -81,9 +98,9 @@ inline Hashmap::ptr_t Hashmap::tag(Hashmap::hash_t hash) {
     return ((size_t)1) << (tagPos + (sizeof(ptr_t) * 8 - 16));  // 实际就是1 << (48 + tagPos)
 }
 
-//inline Vec8u Hashmap::tag(Vec8u hashes) {
+//inline v8u64 Hashmap::tag(v8u64 hashes) {
 //    auto tagPos = hashes >> (sizeof(hash_t) * 8 - 4);
-//    return Vec8u(1) << (tagPos + Vec8u(sizeof(ptr_t) * 8 - 16));
+//    return v8u64(1) << (tagPos + v8u64(sizeof(ptr_t) * 8 - 16));
 //}
 
 inline Hashmap::EntryHeader* Hashmap::ptr(Hashmap::EntryHeader* p) {
@@ -140,16 +157,16 @@ inline Hashmap::EntryHeader* Hashmap::find_chain_tagged(hash_t hash) {
     auto filterMatch = (size_t)candidate & tag(hash);  // 通过tag快速判断hash是否在该链桶当中。
     if (filterMatch)
       return ptr(candidate);
-   else
+    else
       return end();
 }
 
-//inline Vec8uM Hashmap::find_chain_tagged(Vec8u hashes) {
-//    auto pos = hashes & Vec8u(mask);
-//    Vec8u candidates = _mm512_i64gather_epi64(pos, (const long long int*)entries, 8);
-//    Vec8u filterMatch = candidates & tag(hashes);
-//    __mmask8 matches = filterMatch != Vec8u(uint64_t(0));
-//    candidates = candidates & Vec8u(maskPointer);
+//inline v8u64M Hashmap::find_chain_tagged(v8u64 hashes) {
+//    auto pos = hashes & v8u64(mask);
+//    v8u64 candidates = _mm512_i64gather_epi64(pos, (const long long int*)entries, 8);
+//    v8u64 filterMatch = candidates & tag(hashes);
+//    __mmask8 matches = filterMatch != v8u64(uint64_t(0));
+//    candidates = candidates & v8u64(maskPointer);
 //    return {candidates, matches};
 //}
 
@@ -217,48 +234,43 @@ void inline Hashmap::clear() {
         entries[i].store(end(), std::memory_order_relaxed);
     }
 }
-#ifdef SPC__SUPPORTS_AVX2
-#include <immintrin.h>
-inline __m256i hash_32_simd(__m256i keys, uint32_t seed =  4000932304) {
-    const __m256i c1 = _mm256_set1_epi32(0xcc9e2d51);
-    const __m256i c2 = _mm256_set1_epi32(0x1b873593);
-    const __m256i seed_vec = _mm256_set1_epi32(seed);
-    const __m256i five = _mm256_set1_epi32(5);
-    const __m256i mix_constant = _mm256_set1_epi32(0xe6546b64);
+//#ifdef SPC__SUPPORTS_AVX2
+//#include <immintrin.h>
+//inline __m256i hash_32_simd(__m256i keys, uint32_t seed =  4000932304) {
+//    const __m256i c1 = _mm256_set1_epi32(0xcc9e2d51);
+//    const __m256i c2 = _mm256_set1_epi32(0x1b873593);
+//    const __m256i seed_vec = _mm256_set1_epi32(seed);
+//    const __m256i five = _mm256_set1_epi32(5);
+//    const __m256i mix_constant = _mm256_set1_epi32(0xe6546b64);
+//
+//    // 处理流程
+//    __m256i k = _mm256_mullo_epi32(keys, c1);
+//    k = _mm256_or_si256(_mm256_slli_epi32(k, 15), _mm256_srli_epi32(k, 17));
+//    k = _mm256_mullo_epi32(k, c2);
+//
+//    __m256i hash = _mm256_xor_si256(seed_vec, k);
+//    hash = _mm256_or_si256(_mm256_slli_epi32(hash, 13), _mm256_srli_epi32(hash, 19));
+//    hash = _mm256_add_epi32(_mm256_mullo_epi32(hash, five), mix_constant);
+//
+//    // Finalization mix
+//    hash = _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 16));
+//    hash = _mm256_mullo_epi32(hash, _mm256_set1_epi32(0x85ebca6b));
+//    hash = _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 13));
+//    hash = _mm256_mullo_epi32(hash, _mm256_set1_epi32(0xc2b2ae35));
+//    hash = _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 16));
+//
+//    return hash;
+//}
+//#endif
 
-    // 处理流程
-    __m256i k = _mm256_mullo_epi32(keys, c1);
-    k = _mm256_or_si256(_mm256_slli_epi32(k, 15), _mm256_srli_epi32(k, 17));
-    k = _mm256_mullo_epi32(k, c2);
-
-    __m256i hash = _mm256_xor_si256(seed_vec, k);
-    hash = _mm256_or_si256(_mm256_slli_epi32(hash, 13), _mm256_srli_epi32(hash, 19));
-    hash = _mm256_add_epi32(_mm256_mullo_epi32(hash, five), mix_constant);
-
-    // Finalization mix
-    hash = _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 16));
-    hash = _mm256_mullo_epi32(hash, _mm256_set1_epi32(0x85ebca6b));
-    hash = _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 13));
-    hash = _mm256_mullo_epi32(hash, _mm256_set1_epi32(0xc2b2ae35));
-    hash = _mm256_xor_si256(hash, _mm256_srli_epi32(hash, 16));
-
-    return hash;
-}
-#endif
-#if defined(SPC__SUPPORTS_AVX2) || defined(SPC__SUPPORTS_AVX) || \
-    defined(SPC__SUPPORTS_NEON) || defined(SPC__SUPPORTS_VSX) || \
-    defined(SPC__SUPPORTS_VMX)
-#define SIMD_SIZE 8
-#define INIT_MACRO(X) X,X,X,X,X,X,X,X
-
-typedef uint32_t vu32 __attribute__((__vector_size__(sizeof(uint32_t) * SIMD_SIZE)));
-static inline vu32 rotl32(vu32 x, int r) {
+#ifdef SIMD_SIZE
+static inline v8u32 rotl32(v8u32 x, int r) {
     // 利用向量运算进行移位操作，r 必须是常数或标量
     return (x << r) | (x >> (32 - r));
 }
 
 // 向量版 fmix32 函数，用于最终混合散列值
-static inline vu32 fmix32(vu32 h) {
+static inline v8u32 fmix32(v8u32 h) {
     h ^= (h >> 16);
     h *= 0x85ebca6b;  // 使用常量初始化的向量，所有元素均为 0x85ebca6b
     h ^= (h >> 13);
@@ -268,7 +280,7 @@ static inline vu32 fmix32(vu32 h) {
 }
 
 // 向量版 MurMurHash3：同时处理 8 个 key
-static inline vu32 hash_32(vu32 key, vu32 seed) {
+static inline v8u32 hash_32(v8u32 key, v8u32 seed) {
     key *= 0xcc9e2d51;
     key = rotl32(key, 15);
     key *= 0x1b873593;
@@ -283,10 +295,32 @@ static inline vu32 hash_32(vu32 key, vu32 seed) {
 // 示例函数：对 8 个 key 计算 hash，并将结果存入数组
 void inline compute_hashes(const uint32_t *keys, uint32_t *hashes) {
     // 统一设置种子，所有分量均为同一个值（例如 4000932304）
-    constexpr vu32 seed = {INIT_MACRO(4000932304U)};
-//    auto* aligned_hashes = reinterpret_cast<vu32*>(__builtin_assume_aligned(hashes, 32));
-//    *aligned_hashes = hash_32(*reinterpret_cast<const vu32*>(keys), seed);
-    *reinterpret_cast<vu32*>(hashes) = hash_32(*reinterpret_cast<const vu32*>(keys), seed);
+    constexpr v8u32 seed = {INIT_MACRO(4000932304U)};
+//    auto* aligned_hashes = reinterpret_cast<v8u32*>(__builtin_assume_aligned(hashes, 32));
+//    *aligned_hashes = hash_32(*reinterpret_cast<const v8u32*>(keys), seed);
+    *reinterpret_cast<v8u32*>(hashes) = hash_32(*reinterpret_cast<const v8u32*>(keys), seed);
+}
+
+inline v8u64 Hashmap::find_chain_tagged(v8u32 hashes) {
+    auto pos = hashes & v8u32{INIT_MACRO(mask)};
+
+    v8u64 candidates;
+    const auto aligned_entries = reinterpret_cast<const uint64_t*>(__builtin_assume_aligned(entries, 64));
+    for (int i = 0; i < 8; i++) { // 模拟 gather：将 entries 按 pos[i] 位置加载
+        candidates[i] = __builtin_nontemporal_load(&aligned_entries[pos[i]]);
+    }
+
+    v8u64 filterMatch = candidates & tag(hashes);
+
+    v8u64 masks = __builtin_convertvector(filterMatch != v8u64{0}, v8u64);
+    v8u64 results = (candidates & v8u64{INIT_MACRO(maskPointer)}) & masks;
+    return results;
+}
+
+inline v8u64 Hashmap::tag(v8u32 hashes) {
+    v8u32 tagPos = hashes >> (sizeof(hash_t)*8 - 4);
+    v8u64 tagPos64 = __builtin_convertvector(tagPos, v8u64);
+    return v8u64{INIT_MACRO(1)} << (tagPos64 + sizeof(ptr_t) * 8 - 16);
 }
 #endif
 

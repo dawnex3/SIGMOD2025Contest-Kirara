@@ -233,7 +233,27 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
                 auto& shared = shared_manager.get<Hashjoin::Shared>(node_idx + 1); //共享状态id设为node_idx+1
                 Operator *left_op = getOperator(plan, value.left, shared_manager, vector_size);
                 Operator *right_op = getOperator(plan, value.right, shared_manager, vector_size);
-                if(value.build_left){   // 左侧构建，正常情况
+                if (left_op == nullptr){
+                    auto one_line = std::get<ScanNode>(plan.nodes[value.left].data);
+                    const ColumnarTable& table = plan.inputs[one_line.base_table_id];
+                    std::vector<const Column*> columns;
+                    for(auto [col_idx, _]: node.output_attrs){
+                        columns.push_back(&table.columns[col_idx]);
+                    }
+                    Operator *naive_join = new (local_allocator.allocate(sizeof(Naivejoin))) Naivejoin(
+                        vector_size, right_op, value.right_attr, columns, node.output_attrs);
+                    return naive_join;
+                } else if (right_op == nullptr){
+                    auto one_line = std::get<ScanNode>(plan.nodes[value.right].data);
+                    const ColumnarTable& table = plan.inputs[one_line.base_table_id];
+                    std::vector<const Column*> columns;
+                    for(auto [col_idx, _]: node.output_attrs){
+                        columns.push_back(&table.columns[col_idx]);
+                    }
+                    Operator *naive_join = new (local_allocator.allocate(sizeof(Naivejoin))) Naivejoin(
+                        vector_size, left_op, value.left_attr, columns, node.output_attrs);
+                    return naive_join;
+                } else if(value.build_left){   // 左侧构建，正常情况
                     Operator *hash_join = new (local_allocator.allocate(sizeof(Hashjoin))) Hashjoin(
                         shared, vector_size, left_op, value.left_attr,
                         right_op, value.right_attr, node.output_attrs, plan.nodes[value.left].output_attrs);
@@ -245,7 +265,7 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
                     for(auto [col_idx, col_type]: node.output_attrs){
                         output_attrs.emplace_back(col_idx>=left_size ? col_idx-left_size : col_idx+right_size, col_type);
                     }
-                    Hashjoin *hash_join = new (local_allocator.allocate(sizeof(Hashjoin))) Hashjoin(
+                    auto *hash_join = new (local_allocator.allocate(sizeof(Hashjoin))) Hashjoin(
                         shared, vector_size, right_op, value.right_attr,
                         left_op, value.left_attr, output_attrs, plan.nodes[value.right].output_attrs);
                     return hash_join;
@@ -253,6 +273,10 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
             } else if constexpr (std::is_same_v<T, ScanNode>){
                 // 如果是scan节点
                 const ColumnarTable& table = plan.inputs[value.base_table_id];
+                if (table.num_rows == 1){
+                    printf("ONLY ONE! %lu\n", value.base_table_id);
+                    return nullptr;
+                }
                 auto& shared = shared_manager.get<Scan::Shared>(node_idx + 1); //共享状态id设为node_idx+1
                 size_t row_num = table.num_rows;
                 // 填充数据源
@@ -452,7 +476,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     printPlanTree(plan);    // 以人类可读的方式打印计划树
 #endif
 
-    size_t thread_num = threadNum(plan);                // 线程数
+    size_t thread_num = 1;                // 线程数
     const int vector_size = 1024;                       // 向量化的批次大小
     std::vector<std::thread> threads;                   // 线程池
     std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
