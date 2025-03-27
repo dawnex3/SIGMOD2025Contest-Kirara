@@ -21,6 +21,9 @@
 #include "Barrier.hpp"
 #include "DataStructure.hpp"
 #include "MemoryPool.hpp"
+#ifdef SPC__SUPPORTS_AVX2
+#include <immintrin.h>
+#endif
 
 namespace Contest {
 //#define DEBUG_LOG
@@ -269,6 +272,94 @@ public:
         next_probe_ = i;
         return found;
     }
+
+#if defined(SPC__SUPPORTS_AVX2)
+    using vu32 = uint32_t __attribute__((vector_size(32))); // 256-bit (8x uint32)
+    #define INIT_LIST(x) x,x,x,x,x,x,x,x
+    #define SIMD_LANE 8
+#else
+    using vu32 = uint32_t __attribute__((vector_size(16))); // 128-bit (4x uint32)
+    #define INIT_LIST(x) x,x,x,x
+    #define SIMD_LANE 4
+#endif
+
+// 掩码快速处理函数
+    inline uint32_t generate_mask(vu32 keys, vu32 key) {
+        vu32 mask = (keys == key);
+    #if defined(SPC__SUPPORTS_AVX2)
+        return _mm256_movemask_ps((__m256)mask); // AVX2 直接生成位掩码
+    #else
+        uint32_t bitmask = 0;
+        for (int i = 0; i < SIMD_LANE; ++i) {
+            bitmask |= (!!mask[i]) << i; // 提取有效位
+        }
+        return bitmask;
+    #endif
+    }
+
+    uint32_t joinAllOptimizedSIMD() {
+        size_t found = 0;
+        size_t i = next_probe_;
+
+        // 确保内存对齐（关键性能优化）
+        auto* aligned_keys = reinterpret_cast<const vu32*>(
+            __builtin_assume_aligned(key_source_, 64)
+        );
+        
+        const auto key = *reinterpret_cast<const uint32_t*>(
+            ht_entrys_ + build_value_offsets_[one_idx_]
+        );
+        const vu32 one_line_key = vu32{INIT_LIST(key)};
+    
+        // 主 SIMD 处理循环
+        for (; i + SIMD_LANE <= num_probe_; i += SIMD_LANE) {
+            vu32 keys = aligned_keys[i / SIMD_LANE]; // 对齐加载
+            
+            // 生成掩码并处理
+            uint32_t bitmask = generate_mask(keys, one_line_key);
+            bitmask &= (1U << SIMD_LANE) - 1; // 掩码有效性过滤
+            
+            if (__builtin_expect(__builtin_popcount(bitmask) > vec_size_ - found, 0)) {
+                next_probe_ = i;
+                return found;
+            }
+            
+            // 快速遍历有效位（无分支优化）
+            while (bitmask) {
+                unsigned pos = __builtin_ctz(bitmask);
+                probe_matches_[found++] = i + pos;
+                bitmask &= bitmask - 1;
+            }
+        }
+    
+        // 尾部处理（改用 4 元素向量）
+//        using v4u32 = uint32_t __attribute__((vector_size(16)));
+//        if constexpr (SIMD_LANE > 4) { // 仅需在 AVX2 模式下处理
+//            if (i + 4 <= num_probe_) {
+//                v4u32 keys = *(v4u32*)(key_source_ + i);
+//                v4u32 mask = (keys == v4u32{key, key, key, key});
+//
+//                uint32_t tail_mask;
+//                memcpy(&tail_mask, &mask, sizeof(tail_mask));
+//                while (tail_mask) {
+//                    unsigned pos = __builtin_ctz(tail_mask);
+//                    probe_matches_[found++] = i + pos;
+//                    tail_mask &= tail_mask - 1;
+//                }
+//                i += 4;
+//            }
+//        }
+    
+        // 剩余标量处理
+        for (; i < num_probe_ && found < vec_size_; ++i) {
+            if (key_source_[i] == key) {
+                probe_matches_[found++] = i;
+            }
+        }
+    
+        next_probe_ = i;
+        return found;
+    }
 #endif
 
     OperatorResultTable next() override {
@@ -306,7 +397,7 @@ public:
 //                    (uint8_t*)probe_keys_, sizeof(uint32_t));
             }
             uint32_t n;
-            n = joinAllNaive();
+            n = joinAllOptimizedSIMD();
 #ifdef SIMD_SIZE
 
 //            if (typeid(*right_) == typeid(Scan))
