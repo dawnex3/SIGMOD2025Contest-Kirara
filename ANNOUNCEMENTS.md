@@ -1,5 +1,20 @@
 # Announcements
 
+### 2025-03-27
+  - Please read the following notes on `build_context()`, third-party libraries, and the final evaluation carefully
+  - **`build_context()`**:
+    - The `build_context()` function cannot access any data, queries, or plans in any form.
+    - Before the execution of `build_context()`, no computation by the participants' code is allowed, which means:
+      - Global variables with constructors are not allowed.
+      - Initializing global variables with functions is not allowed.
+      - Any code that runs before `main()` is not allowed.
+    - The `build_context()` function can create background tasks.
+  - **Third-party libraries**:
+    - It is not allowed to use third-party libraries already present in `CMakeLists.txt` as they are only for providing the general setup.
+    - Learning from third-party libraries and writing related functions from scratch is allowed, but copying and modifying third-party libraries is not allowed.
+  - **Final evaluation**:
+    - As stated on the contest website, we will use a larger set of queries with different predicates for the final evaluation and increase the number of servers. Please do not make any assumptions about the execution and verification of queries as this might be different from the current evaluation.
+
 ### 2025-03-24
   - We are currently experiencing problems with the IBM machine. We are working on restoring the machine.
 
