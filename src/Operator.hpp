@@ -148,6 +148,7 @@ private:
     uint8_t *ht_entrys_ = nullptr;
     uint32_t * probe_matches_;
     uint32_t * probe_keys_;
+    uint32_t * key_source_ = nullptr;
 
     OperatorResultTable multi_result_;
     OperatorResultTable last_result_;       // 上一次调用next的返回结果。本次调用修改一些参数就可以返回。
@@ -220,7 +221,7 @@ public:
         size_t i = next_probe_;
         auto one_line_key = *reinterpret_cast<uint32_t*>(ht_entrys_ + build_value_offsets_[one_idx_]);
         for (;i < num_probe_ && found < vec_size_; i++) {
-            uint32_t key = probe_keys_[i];
+            uint32_t key = key_source_[i];
             if (one_line_key == key) {
                 probe_matches_[found] = i;  // 记录右表匹配的行号
                 found ++;
@@ -257,8 +258,18 @@ public:
                     last_result_.num_rows_ = 0;
                     return last_result_;
                 }
-                gatherCol<false>(multi_result_.columns_[multi_idx_], multi_result_.num_rows_,
-                    (uint8_t*)probe_keys_, sizeof(uint32_t));
+                OperatorResultTable::ColumnVariant key_col = multi_result_.columns_[multi_idx_];
+                std::visit([&](auto&& arg) {
+                    using T = std::decay_t<decltype(arg)>;
+                    if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn>){
+                        gatherContinuousCol(arg, multi_result_.num_rows_, (uint8_t*)probe_keys_, sizeof(uint32_t));
+                        key_source_ = probe_keys_;
+                    } else {
+                        key_source_ = reinterpret_cast<uint32_t*>(arg.second);
+                    }
+                }, key_col);
+//                gatherCol<false>(multi_result_.columns_[multi_idx_], multi_result_.num_rows_,
+//                    (uint8_t*)probe_keys_, sizeof(uint32_t));
             }
             uint32_t n;
             n = joinAllNaive();
@@ -348,6 +359,7 @@ private:
     uint32_t * probe_keys_;                  // right_result_的键值列的哈希值与键值组合
     Hashmap::EntryHeader** build_matches_;  // 哈希表中匹配的条目
     uint32_t * probe_matches_;              // 构建侧匹配的行的行号
+    uint32_t * key_source_ = nullptr;
 
     OperatorResultTable last_result_;       // 上一次调用next的返回结果。本次调用修改一些参数就可以返回。
     LocalVector<size_t> output_attrs_;      // 需要输出哪些列
@@ -509,7 +521,7 @@ public:
 #endif
                     return last_result_;
                 }
-                // 计算right_result_中键的哈希值，存储到probe_hks_数组中
+                // 计算right_result_中键的哈希值，存储到probe_hashs_数组中
                 calculateColHash<true>(right_result_.columns_[right_idx_], right_result_.num_rows_,
                     (uint8_t *)probe_hashs_, (uint8_t*)probe_keys_, sizeof(uint32_t));
             }
@@ -572,22 +584,27 @@ public:
                 // 已实例化的列为 std::pair<DataType, void*>，是一块连续的数组
                 assert(arg.first == DataType::INT32);
                 const int32_t* base = static_cast<int32_t*>(arg.second);
+                if constexpr (targetDense){
+                    key_source_ = static_cast<uint32_t*>(arg.second);;
+                } else {
+                    key_source_ = probe_keys_;
+                }
 
                 size_t i = 0;
                 while (reinterpret_cast<uintptr_t>(base + i) % 32 != 0){
                     *(uint32_t *)target = hash_32(base[i]);
-                    *(uint32_t *)target_keys = base[i];
                     target += step;
-                    target_keys += step;
                     i++;
+                    if constexpr (!targetDense){
+                        *(uint32_t *)target_keys = base[i];
+                        target_keys += step;
+                    }
                 }
 
                 if constexpr (targetDense){
                     for (; i + SIMD_SIZE-1 < n; i += SIMD_SIZE) {
                         compute_hashes(reinterpret_cast<const uint32_t*>(base + i), reinterpret_cast<uint32_t*>(target));
-                        *reinterpret_cast<v8u32*>(target_keys) = *reinterpret_cast<const v8u32*>(base + i);
                         target += sizeof(v8u32);
-                        target_keys += sizeof(v8u32);
                     }
                 } else {
                     for (; i + SIMD_SIZE-1 < n; i += SIMD_SIZE) {
@@ -606,13 +623,16 @@ public:
                 for (; i < n; ++i) {
                     uint32_t hash = hash_32(base[i]);
                     *(uint32_t*)target = hash;
-                    *(uint32_t*)(target_keys) = base[i];
                     target += step;
-                    target_keys += step;
+                    if constexpr (!targetDense){
+                        *(uint32_t *)target_keys = base[i];
+                        target_keys += step;
+                    }
                 }
             } else if constexpr (std::is_same_v<T, OperatorResultTable::ContinuousColumn>) {
                 // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>，它存放在多个Page中。
                 const Column* col = std::get<0>(arg);
+                key_source_ = probe_keys_;
                 assert(col->type==DataType::INT32);
                 size_t processed = 0; 
                 size_t remaining = n;  
@@ -819,7 +839,7 @@ public:
 
         for (size_t i = cont_.next_probe_, end = cont_.num_probe_; i < end; i++) {
             uint32_t hash = probe_hashs_[i];
-            uint32_t key = probe_keys_[i];
+            uint32_t key = key_source_[i];
             auto tmp = 0;
             for (auto entry = shared_.hashmap_.find_chain_tagged(hash); entry != nullptr; entry = entry->next) {
                 tmp++;
