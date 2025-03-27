@@ -144,6 +144,7 @@ private:
 
     size_t num_probe_ = 0;
     size_t next_probe_ = 0;
+    size_t last_max_ = 0;
 
     uint8_t *ht_entrys_ = nullptr;
     uint32_t * probe_matches_;
@@ -208,11 +209,11 @@ public:
 
     void gatherEntry(OperatorResultTable::InstantiatedColumn output_column, uint32_t n, size_t offset){
         if(output_column.first==DataType::INT32){
-            auto* base = (int32_t*)output_column.second;
-            std::fill_n(base, n, *(int32_t*)(ht_entrys_ + offset));
+            auto* base = (int32_t*)output_column.second + last_max_;
+            std::fill_n(base, n - last_max_, *(int32_t*)(ht_entrys_ + offset));
         } else if(output_column.first==DataType::VARCHAR){
-            auto * base = (uint64_t*)output_column.second;
-            std::fill_n(base, n, *(uint64_t*)(ht_entrys_ + offset));
+            auto * base = (uint64_t*)output_column.second + last_max_;
+            std::fill_n(base, n - last_max_, *(uint64_t*)(ht_entrys_ + offset));
         }
     }
 
@@ -223,19 +224,52 @@ public:
         for (;i < num_probe_ && found < vec_size_; i++) {
             uint32_t key = key_source_[i];
             if (one_line_key == key) {
-                probe_matches_[found] = i;  // 记录右表匹配的行号
-                found ++;
-//                if (found == vec_size_) {
-//                    if (i + 1 < end){    //本次哈希链已处理完，但是后面还有待probe的hash
-//                        next_probe_ = i+1;
-//                        return vec_size_;
-//                    }
-//                }
+                probe_matches_[found++] = i;  // 记录右表匹配的行号
             }
         }
         next_probe_ = i;
         return found;   // 该探测批次处理完了，但是没凑够vec_size_个
     }
+
+#ifdef SIMD_SIZE
+    using v8i8 = int8_t __attribute__((vector_size(8)));
+    uint32_t joinAllNaiveSIMD() {
+        size_t found = 0;
+        size_t i = next_probe_;
+        auto key = *reinterpret_cast<uint32_t*>(ht_entrys_ + build_value_offsets_[one_idx_]);
+        auto one_line_key = v8u32{INIT_MACRO(key)};
+
+        for (; i + 8 <= num_probe_; i += 8) {
+            v8u32 keys = *(v8u32*)(key_source_ + i);  // 加载 8 个待匹配的键
+            v8u32 mask = (keys == one_line_key);       // SIMD 比较操作（返回 0xFFFFFFFF / 0）
+
+            v8i8 match_mask = __builtin_convertvector(mask >> 31, v8i8); // 提取最高位，转换成 8-bit 掩码
+            uint64_t bitmask;
+            __builtin_memcpy(&bitmask, &match_mask, sizeof(bitmask)); // 复制 8 字节的掩码
+            bitmask &= 0x0101010101010101U; // 只取低 8 位
+            if (__glibc_unlikely(__builtin_popcountl(bitmask) > vec_size_ - found)){
+                next_probe_ = i;
+                return found;
+            }
+
+            while (bitmask) {
+                int pos = __builtin_ctzl(bitmask) / 8; // 找到最低的 1 位索引
+                probe_matches_[found++] = i + pos;
+                bitmask &= bitmask - 1; // 清除最低位 1
+            }
+        }
+
+        // 处理不足 8 个的尾部
+        for (; i < num_probe_ && found < vec_size_; i++) {
+            if (key == key_source_[i]) {
+                probe_matches_[found++] = i;
+            }
+        }
+
+        next_probe_ = i;
+        return found;
+    }
+#endif
 
     OperatorResultTable next() override {
         if (ht_entrys_ == nullptr) {
@@ -272,7 +306,7 @@ public:
 //                    (uint8_t*)probe_keys_, sizeof(uint32_t));
             }
             uint32_t n;
-            n = joinAllNaive();
+            n = joinAllNaiveSIMD();
 #ifdef SIMD_SIZE
 
 //            if (typeid(*right_) == typeid(Scan))
@@ -282,13 +316,17 @@ public:
 #endif
             if (n == 0) continue;
             // 物化最终结果。将匹配的(Entry*, pos)中，左侧的值收集起来，右侧对应的行的值也收集起来
-            last_result_.num_rows_ = n;
+
             size_t one_column_num = columns_.size();
+            last_result_.num_rows_ = n;
             for(size_t out_idx=0;out_idx<output_attrs_.size();out_idx++) {
                 auto column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[out_idx]);
                 size_t in_idx = output_attrs_[out_idx];
                 if (in_idx < one_column_num) { // 如果是构建表
-                    gatherEntry(column, n, build_value_offsets_[in_idx]);
+                    if (last_max_ < n){
+                        gatherEntry(column, n, build_value_offsets_[in_idx]);
+                        last_max_ = n;
+                    }
                 } else if(in_idx - one_column_num != multi_idx_ ){  // 如果是探测表的非键值侧
                     gatherCol<true>(multi_result_.columns_[in_idx - one_column_num], n,
                         (uint8_t*)column.second, column.first == DataType::INT32 ? 4 : 8, probe_matches_);
