@@ -140,24 +140,54 @@ private:
     std::vector<const Column*> columns_;
     Operator *multi_;    // 右侧算子（探测侧）
     size_t multi_idx_;
+    size_t one_idx_;
 
     size_t num_probe_ = 0;
     size_t next_probe_ = 0;
+
+    uint8_t *ht_entrys_ = nullptr;
+    uint32_t * probe_matches_;
+    uint32_t * probe_keys_;
+
     OperatorResultTable multi_result_;
-    OperatorResultTable one_line_;
     OperatorResultTable last_result_;       // 上一次调用next的返回结果。本次调用修改一些参数就可以返回。
     LocalVector<size_t> output_attrs_;      // 需要输出哪些列
 
-    LocalVector<std::pair<uint8_t*, size_t>> allocations_;  // 存储多个哈希表条目数组<数组指针，数组大小>
+    size_t ht_entry_size_ = 0;  // 哈希表一行的大小。哈希表的一行由一个EntryHeader，加上其余要输出的构建侧列组成
+    LocalVector<size_t> build_value_offsets_;
 
 public:
-    Naivejoin(size_t vec_size, Operator *multi, size_t multi_idx, std::vector<const Column*> columns,
+    Naivejoin(size_t vec_size, Operator *multi, size_t multi_idx,
+        std::vector<const Column*> columns, size_t one_idx,
         const std::vector<std::tuple<size_t, DataType>>& output_attrs)
-    :  vec_size_(vec_size), columns_(std::move(columns)),
-    multi_(multi), multi_idx_(multi_idx) {
+    : vec_size_(vec_size), multi_(multi), multi_idx_(multi_idx), columns_(std::move(columns)), one_idx_(one_idx){
+        // 计算ht_entry_size_和build_value_offsets_
+        // 为了满足对齐的需求，并且让整个entry最小，需要对左表的列顺序重新排列，将int32_t放到前面，uint64_t放到后面
+        build_value_offsets_.resize(columns_.size());
+        for(uint32_t i=0; i<columns_.size(); i++){
+            if(columns_[i]->type==DataType::INT32){ // 此处跳过构建侧键值。它存储在EntryHeader里面而不是后面
+                build_value_offsets_[i]=ht_entry_size_;
+                ht_entry_size_ += 4;
+            }
+        }
+
+        ht_entry_size_ = (ht_entry_size_ + 7) & ~7;   // 将ht_entry_size_补齐到8倍数
+        for(uint32_t i=0; i<columns_.size(); i++){
+            if(columns_[i]->type!=DataType::INT32){
+                build_value_offsets_[i]=ht_entry_size_;
+                ht_entry_size_ += 8;
+            }
+        }
+
+        probe_matches_ = (uint32_t*)local_allocator.allocate(vec_size_ * sizeof(uint32_t));
+        probe_keys_ = (uint32_t*)local_allocator.allocate(vec_size_ * sizeof(uint32_t));
+
         // 分配结果表last_result_的内存，设置output_attrs_
-        for(auto [col_idx, col_type]: output_attrs){
+        for(auto [col_idx, col_type]:output_attrs){
             // 如果构建侧的连接键需要输出，那么换成探测侧的连接键来输出。这样方便收集
+            if(col_idx==one_idx_){
+                col_idx = multi_idx_ + columns_.size();
+            }
             output_attrs_.push_back(col_idx);
             if(col_type==DataType::INT32){
                 void* col_buffer = local_allocator.allocate(vec_size*sizeof(int32_t));
@@ -175,33 +205,84 @@ public:
         return last_result_.columns_.size();
     }
 
+    void gatherEntry(OperatorResultTable::InstantiatedColumn output_column, uint32_t n, size_t offset){
+        if(output_column.first==DataType::INT32){
+            auto* base = (int32_t*)output_column.second;
+            std::fill_n(base, n, *(int32_t*)(ht_entrys_ + offset));
+        } else if(output_column.first==DataType::VARCHAR){
+            auto * base = (uint64_t*)output_column.second;
+            std::fill_n(base, n, *(uint64_t*)(ht_entrys_ + offset));
+        }
+    }
+
+    uint32_t joinAllNaive() {
+        size_t found = 0;
+        size_t i = next_probe_;
+        auto one_line_key = *reinterpret_cast<uint32_t*>(ht_entrys_ + build_value_offsets_[one_idx_]);
+        for (;i < num_probe_ && found < vec_size_; i++) {
+            uint32_t key = probe_keys_[i];
+            if (one_line_key == key) {
+                probe_matches_[found] = i;  // 记录右表匹配的行号
+                found ++;
+//                if (found == vec_size_) {
+//                    if (i + 1 < end){    //本次哈希链已处理完，但是后面还有待probe的hash
+//                        next_probe_ = i+1;
+//                        return vec_size_;
+//                    }
+//                }
+            }
+        }
+        next_probe_ = i;
+        return found;   // 该探测批次处理完了，但是没凑够vec_size_个
+    }
+
     OperatorResultTable next() override {
+        if (ht_entrys_ == nullptr) {
+            ht_entrys_ = (uint8_t*)local_allocator.allocate(1 * ht_entry_size_);
+//            OperatorResultTable::ColumnVariant  left_key = columns_[one_idx_];
+//            calculateColHash<false>(left_key, 1, ht_entrys+offsetof(Hashmap::EntryHeader, hash), ht_entrys+offsetof(Hashmap::EntryHeader, key), ht_entry_size_);
+            for(int col_idx=0; col_idx< columns_.size(); col_idx++){
+                gatherCol<false>(std::tuple<const Column*, uint32_t, uint32_t>{columns_[col_idx], 0, 0},
+                    1,ht_entrys_ + build_value_offsets_[col_idx],ht_entry_size_);
+            }
+        }
+
         // 探测阶段
         while (true) {
             if (next_probe_ >= num_probe_) {
-                multi_result_ = multi_->next();     // 调用右侧算子，结果保存到right_result_
+                multi_result_ = multi_->next();
                 next_probe_ = 0;
                 num_probe_ = multi_result_.num_rows_;
-
                 if (num_probe_ == 0) {
                     last_result_.num_rows_ = 0;
                     return last_result_;
                 }
+                gatherCol<false>(multi_result_.columns_[multi_idx_], multi_result_.num_rows_,
+                    (uint8_t*)probe_keys_, sizeof(uint32_t));
             }
+            uint32_t n;
+            n = joinAllNaive();
+#ifdef SIMD_SIZE
 
+//            if (typeid(*right_) == typeid(Scan))
+//                n = joinAll();
+//            else
+//                n = joinAllSIMD();
+#endif
+            if (n == 0) continue;
             // 物化最终结果。将匹配的(Entry*, pos)中，左侧的值收集起来，右侧对应的行的值也收集起来
-            last_result_.num_rows_ = ;
-            size_t left_column_num = left_->resultColumnNum();
+            last_result_.num_rows_ = n;
+            size_t one_column_num = columns_.size();
             for(size_t out_idx=0;out_idx<output_attrs_.size();out_idx++) {
                 auto column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[out_idx]);
                 size_t in_idx = output_attrs_[out_idx];
-                if (in_idx < left_column_num) { // 如果是构建表
+                if (in_idx < one_column_num) { // 如果是构建表
                     gatherEntry(column, n, build_value_offsets_[in_idx]);
-                } else if(in_idx - left_column_num != right_idx_ ){  // 如果是探测表的非键值侧
-                    gatherCol<true>(right_result_.columns_[in_idx - left_column_num], n,
+                } else if(in_idx - one_column_num != multi_idx_ ){  // 如果是探测表的非键值侧
+                    gatherCol<true>(multi_result_.columns_[in_idx - one_column_num], n,
                         (uint8_t*)column.second, column.first == DataType::INT32 ? 4 : 8, probe_matches_);
                 } else {    // 如果是探测表的键值侧
-                    OperatorResultTable::ColumnVariant key_col = right_result_.columns_[in_idx - left_column_num];
+                    OperatorResultTable::ColumnVariant key_col = multi_result_.columns_[in_idx - one_column_num];
                     std::visit([&](auto&& key_col) {
                         using T = std::decay_t<decltype(key_col)>;
                         if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
@@ -434,14 +515,15 @@ public:
             }
             // 调用探测函数，检测哈希值和键值都相等的(Entry*, pos)对，分别存储在build_matches_和probe_matches_中
             uint32_t n;
-#ifdef SIMD_SIZE
-            if (typeid(*right_) == typeid(Scan))
-                n = joinAll();
-            else
-                n = joinAllSIMD();
-#else
             n = joinAll();
-#endif
+//#ifdef SIMD_SIZE
+//            if (typeid(*right_) == typeid(Scan))
+//                n = joinAll();
+//            else
+//                n = joinAllSIMD();
+//#else
+//            n = joinAll();
+//#endif
             if (n == 0) continue;
             // 物化最终结果。将匹配的(Entry*, pos)中，左侧的值收集起来，右侧对应的行的值也收集起来
             last_result_.num_rows_ = n;
@@ -500,7 +582,7 @@ public:
                     i++;
                 }
 
-                if (targetDense){
+                if constexpr (targetDense){
                     for (; i + SIMD_SIZE-1 < n; i += SIMD_SIZE) {
                         compute_hashes(reinterpret_cast<const uint32_t*>(base + i), reinterpret_cast<uint32_t*>(target));
                         *reinterpret_cast<v8u32*>(target_keys) = *reinterpret_cast<const v8u32*>(base + i);
@@ -566,7 +648,7 @@ public:
                                 }
 
                                 // 将向量存储到临时数组
-                                if (targetDense){
+                                if constexpr (targetDense){
                                     alignas(32) uint32_t hash_arr[SIMD_SIZE];
                                     compute_hashes(reinterpret_cast<const uint32_t*>(&keys), hash_arr);
                                     memcpy(target_keys, &keys, sizeof(keys));
