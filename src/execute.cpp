@@ -223,7 +223,7 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
         node.data);
 }
 
-Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& shared_manager, size_t vector_size = 1024){
+Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& shared_manager, size_t vector_size = 1024, bool accept_null=true){
     auto& node = plan.nodes[node_idx];
     return std::visit(
         [&](const auto& value)-> Operator *{
@@ -231,9 +231,9 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
             if constexpr (std::is_same_v<T, JoinNode>) {
                 // 如果是join节点
                 auto& shared = shared_manager.get<Hashjoin::Shared>(node_idx + 1); //共享状态id设为node_idx+1
-                Operator *left_op = getOperator(plan, value.left, shared_manager, vector_size);
                 Operator *right_op = getOperator(plan, value.right, shared_manager, vector_size);
-                if (left_op == nullptr){
+                Operator *left_op = getOperator(plan, value.left, shared_manager, vector_size, right_op != nullptr);
+                if (__glibc_unlikely(left_op == nullptr)){
 //                    printf("BUILD LEFT\n");
                     auto one_line = std::get<ScanNode>(plan.nodes[value.left].data);
                     const ColumnarTable& table = plan.inputs[one_line.base_table_id];
@@ -263,7 +263,7 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
                     Operator *naive_join = new (local_allocator.allocate(sizeof(Naivejoin))) Naivejoin(
                         vector_size, left_op, value.left_attr, columns, value.right_attr, output_attrs);
                     return naive_join;
-                } else if(value.build_left){   // 左侧构建，正常情况
+                } else if(__glibc_unlikely(value.build_left)){   // 左侧构建，不正常情况
                     Operator *hash_join = new (local_allocator.allocate(sizeof(Hashjoin))) Hashjoin(
                         shared, vector_size, left_op, value.left_attr,
                         right_op, value.right_attr, node.output_attrs, plan.nodes[value.left].output_attrs);
@@ -283,7 +283,7 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
             } else if constexpr (std::is_same_v<T, ScanNode>){
                 // 如果是scan节点
                 const ColumnarTable& table = plan.inputs[value.base_table_id];
-                if (table.num_rows == 1){
+                if (table.num_rows == 1 && accept_null){
                     return nullptr;
                 }
                 auto& shared = shared_manager.get<Scan::Shared>(node_idx + 1); //共享状态id设为node_idx+1
