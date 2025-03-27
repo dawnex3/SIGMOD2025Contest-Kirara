@@ -306,7 +306,7 @@ public:
 //                    (uint8_t*)probe_keys_, sizeof(uint32_t));
             }
             uint32_t n;
-            n = joinAllNaiveSIMD();
+            n = joinAllNaive();
 #ifdef SIMD_SIZE
 
 //            if (typeid(*right_) == typeid(Scan))
