@@ -4,9 +4,6 @@
 #include "iostream"
 #include "sstream"
 #include "MemoryPool.hpp"
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
 
 namespace Contest {
 #define FULL_INT32_PAGE (1984)
@@ -81,36 +78,36 @@ public:
 
 class TempIntPage : public TempPage {
 private:
-    LocalVector<uint8_t> bitmap_;
-    Page *page_ = nullptr;
+    LocalVector<uint8_t> bitmap;
+    Page *page = nullptr;
     void alloc_page() {
 #ifdef PROFILER
-        if (page_ != nullptr) {
+        if (page != nullptr) {
             throw std::runtime_error("page is not null");
         }
 #endif
-        page_ = new Page;
-        memset(page_->data, 0, PAGE_SIZE);
+        page = new Page;
+        memset(page->data, 0, PAGE_SIZE);
     }
 public:
     TempIntPage() {
-        bitmap_.reserve(256);
+        bitmap.reserve(256);
     }
 
     uint16_t &num_rows() {
-        return *(uint16_t *)(page_->data);
+        return *(uint16_t *)(page->data);
     }
 
     uint16_t &num_values() {
-        return *(uint16_t *)(page_->data + 2);
+        return *(uint16_t *)(page->data + 2);
     }
 
     int32_t *data() {
-        return (int32_t *)(page_->data + 4);
+        return (int32_t *)(page->data + 4);
     }
 
     bool is_full() {
-        if (page_ == nullptr) {
+        if (page == nullptr) {
             return false;
         } else {
             return 4 + (num_values() + 1) * 4 + (num_rows() / 8 + 1) > PAGE_SIZE;
@@ -118,7 +115,7 @@ public:
     }
 
     bool is_empty() override {
-        return page_ == nullptr;
+        return page == nullptr;
     }
 
     void add_row(int value) {
@@ -131,37 +128,36 @@ public:
             alloc_page();
         }
         if (value != NULL_INT32) {
-            set_bitmap(bitmap_, num_rows());
+            set_bitmap(bitmap, num_rows());
             data()[num_values()] = value;
             num_values() ++;
         } else {
-            unset_bitmap(bitmap_, num_rows());
+            unset_bitmap(bitmap, num_rows());
         }
         num_rows() ++;
     }
 
     Page *dump_page() override {
-        Page *result_page = page_;
-        memcpy(page_->data + PAGE_SIZE - bitmap_.size(), bitmap_.data(), bitmap_.size());
-        bitmap_.clear();
-        page_ = nullptr;
+        Page *result_page = page;
+        memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
+        bitmap.clear();
+        page = nullptr;
         return result_page;
     }
 };
 
 class TempStringPage : public TempPage {
 private:
-  uint16_t num_rows = 0;
-  uint16_t data_len = 0;
-  LocalVector<varchar_ptr> strings_;
-  LocalVector<uint16_t> offsets_;
-  LocalVector<uint8_t> bitmap_;
+    uint16_t              num_rows = 0;
+    LocalVector<char>     data;
+    LocalVector<uint16_t> offsets;
+    LocalVector<uint8_t>  bitmap;
 
 public:
     TempStringPage() {
-        strings_.reserve(256);
-        offsets_.reserve(4096);
-        bitmap_.reserve(512);
+        data.reserve(8192);
+        offsets.reserve(4096);
+        bitmap.reserve(512);
     }
 
     bool is_empty() override {
@@ -172,9 +168,9 @@ public:
         if(value.isLongString()){
             return num_rows==0;
         } else if (value.isNull()) {
-            return 4 + offsets_.size() * 2 + data_len + (num_rows / 8 + 1) <= PAGE_SIZE;
+            return 4 + offsets.size() * 2 + data.size() + (num_rows / 8 + 1) <= PAGE_SIZE;
         } else {
-            return 4 + (offsets_.size() + 1) * 2 + (data_len + value.length()) + (num_rows / 8 + 1) <= PAGE_SIZE;
+            return 4 + (offsets.size() + 1) * 2 + (data.size() + value.length()) + (num_rows / 8 + 1) <= PAGE_SIZE;
         }
     }
 
@@ -188,13 +184,13 @@ public:
         }
 #endif
         if (value.isNull()) {
-            unset_bitmap(bitmap_, num_rows);
+            unset_bitmap(bitmap, num_rows);
             ++num_rows;
         } else {
-            set_bitmap(bitmap_, num_rows);
-            data_len += value.length();
-            strings_.emplace_back(value);
-            offsets_.emplace_back(data_len);
+            set_bitmap(bitmap, num_rows);
+            data.resize(data.size() + value.length());
+            memcpy(data.data() + data.size() - value.length(), value.string(), value.length());
+            offsets.emplace_back(data.size());
             ++num_rows;
         }
     }
@@ -202,21 +198,14 @@ public:
     Page *dump_page() override {
         auto* page                             = new Page;
         *reinterpret_cast<uint16_t*>(page->data)     = num_rows;
-        *reinterpret_cast<uint16_t*>(page->data + 2) = static_cast<uint16_t>(offsets_.size());
-        memcpy(page->data + 4, offsets_.data(), offsets_.size() * sizeof(uint16_t));
-        memcpy(page->data + PAGE_SIZE - bitmap_.size(), bitmap_.data(), bitmap_.size());
-
-        std::byte *current = page->data + 4 + offsets_.size() * sizeof(uint16_t);
-        for (size_t i = 0; i < strings_.size(); i ++) {
-            memcpy(current, strings_[i].string(), strings_[i].length());
-            current += strings_[i].length();
-        }
-
+        *reinterpret_cast<uint16_t*>(page->data + 2) = static_cast<uint16_t>(offsets.size());
+        memcpy(page->data + 4, offsets.data(), offsets.size() * 2);
+        memcpy(page->data + 4 + offsets.size() * 2, data.data(), data.size());
+        memcpy(page->data + PAGE_SIZE - bitmap.size(), bitmap.data(), bitmap.size());
         num_rows = 0;
-        data_len = 0;
-        strings_.clear();
-        offsets_.clear();
-        bitmap_.clear();
+        data.clear();
+        offsets.clear();
+        bitmap.clear();
         return page;
     }
 
