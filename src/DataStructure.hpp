@@ -224,7 +224,7 @@ public:
     //    表示列的数据已经实例化，并提供该列的数据指针。
     using InstantiatedColumn = std::pair<DataType, void*>;
 
-    // 2. 未实例化且行号连续的列，以 std::pair<Column *, uint32_t> 表示，
+    // 2. 未实例化且行号连续的列，以 std::tuple<const Column*, uint32_t, uint32_t> 表示，
     //    表示引用的原始列，以及起始行所在的页码，以及起始行在该页之内的位置。
     using ContinuousColumn = std::tuple<const Column*, uint32_t, uint32_t>;
 
@@ -233,7 +233,7 @@ public:
     //    这个类被弃用了，因为从NonContinuousColumn读取实际值的代价很大，有很多的随机访问，还需要计算行号。
     //    using NonContinuousColumn = std::pair<Column *, uint32_t *>;
 
-    // 将以上三种列类型组合成一个 std::variant 类型
+    // 将以上两种列类型组合成一个 std::variant 类型
     using ColumnVariant = std::variant<InstantiatedColumn, ContinuousColumn>;
 
     // 存储所有列的变体集合
@@ -356,22 +356,89 @@ inline bool isNotNull(const uint8_t* bitmap, uint16_t idx) {
 
 // 计算位图的前n个元素有多少个不为NULL
 size_t getNonNullCount(const uint8_t* bitmap, uint16_t n) {
-    if(n==0) return 0;
+    if (n == 0) return 0;
+    size_t count = 0;
+    uint16_t i = 0;
 
-    int      count          = 0;
-    uint16_t full_bytes     = n / 8;
-    uint8_t  remaining_bits = n % 8;
+    // 计算字节数
+    uint16_t num_bytes = n / 8;
+    uint8_t remainder_bits = n % 8; // 剩余不足 8-bit 的部分
 
-    // 统计完整字节中的 1 的位数
-    for (uint16_t i = 0; i < full_bytes; ++i) {
+    // 处理前导未对齐字节
+    uintptr_t addr = reinterpret_cast<uintptr_t>(bitmap);
+    uint16_t misaligned_bytes = (8 - (addr % 8)) % 8; // 计算前面需要对齐的字节数
+    if (misaligned_bytes > 0 && misaligned_bytes <= num_bytes) {
+        while(i < misaligned_bytes)
+            count += __builtin_popcount(bitmap[i++]);
+    }
+
+    // 处理对齐后的 64-bit 块
+    for (; i + 8 <= num_bytes; i += 8) {
+        count += __builtin_popcountll(*(reinterpret_cast<const uint64_t*>(bitmap + i)));
+    }
+
+    // 处理剩余的完整字节
+    for (; i < num_bytes; i++) {
         count += __builtin_popcount(bitmap[i]);
     }
 
-    // 处理剩余位
-    if (remaining_bits > 0) {
-        uint8_t last_byte  = bitmap[full_bytes];
-        uint8_t mask       = (1 << remaining_bits) - 1; // 保留低 remaining_bits 位
-        count             += __builtin_popcount(last_byte & mask);
+    // 处理不足 8-bit 的部分
+    if (remainder_bits) {
+        uint8_t mask = (1U << remainder_bits) - 1;
+        count += __builtin_popcount(bitmap[i] & mask);
+    }
+
+    return count;
+//和下面的朴素实现区别不大。可能是因为编译器已经优化了？
+//    int      count  = 0;
+//    uint16_t full_bytes     = n / 8;
+//    uint8_t  remaining_bits = n % 8;
+//
+//    // 统计完整字节中的 1 的位数
+//    for (uint16_t i = 0; i < full_bytes; ++i) {
+//        count += __builtin_popcount(bitmap[i]);
+//    }
+//
+//    // 处理剩余位
+//    if (remaining_bits > 0) {
+//        uint8_t last_byte  = bitmap[full_bytes];
+//        uint8_t mask       = (1 << remaining_bits) - 1; // 保留低 remaining_bits 位
+//        count              += __builtin_popcount(last_byte & mask);
+//    }
+//
+//    return count;
+}
+
+size_t getNonNullCount(const uint8_t* bitmap, uint16_t start, uint16_t end) {
+    if (end == start) return 0;
+    size_t count = 0;
+
+    // 计算起始和终止字节索引
+    uint16_t start_byte = start / 8;
+    uint16_t end_byte = end / 8;
+    // 计算起始和终止bit偏移
+    uint8_t start_bit = start % 8;
+    uint8_t end_bit = end % 8;
+
+    // 处理首字节部分 bit
+    if (start_bit) {
+        uint8_t mask = (0xFF << start_bit); // 计算掩码，从 start_bit 开始
+        if (start_byte == end_byte) { // 仅一个字节
+            mask &= (0xFF >> (8 - end_bit)); // 限制到 end_bit
+        }
+        count += __builtin_popcount(bitmap[start_byte] & mask);
+        start_byte++;
+    }
+
+    // 处理剩余的 uint8_t 块
+    while (start_byte < end_byte) {
+        count += __builtin_popcount(bitmap[start_byte++]);
+    }
+
+    // 处理尾字节部分 bit
+    if (start_byte == end_byte && end_bit) {
+        uint8_t mask = (0xFF >> (8 - end_bit)); // 限制到 end_bit
+        count += __builtin_popcount(bitmap[start_byte] & mask);
     }
 
     return count;
@@ -420,7 +487,7 @@ void gatherInstantiatedCol(OperatorResultTable::InstantiatedColumn input_column,
             }
             col_target += col_step;
         }
-    } else if(input_column.first==DataType::VARCHAR){
+    }  else if(input_column.first==DataType::VARCHAR){
         const uint64_t* base = (uint64_t*)input_column.second;
         for (size_t i = 0; i < n; ++i) {
             if constexpr (SpecifiedIndex){
@@ -447,24 +514,31 @@ void gatherContinuousCol(OperatorResultTable::ContinuousColumn input_column, siz
     if(col->type==DataType::INT32) {
         for(size_t i=std::get<1>(input_column); i<col->pages.size(); i++){
             const Page* current_page = col->pages[i];                       // 要读取的页面
-            const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
             size_t start_row = i==std::get<1>(input_column) ? std::get<2>(input_column) : 0;  // 本页的起始行
             size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
-            const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
+            if (true || __glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
+                const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
+                const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
 
-            for (size_t j=start_row; j<end_row; j++) {
-                if (isNotNull(bitmap, j)) {
-                    *(int32_t*)(col_target) = *(base++);
-                } else {
-                    *(int32_t*)(col_target) = NULL_INT32;
+                for (size_t j=start_row; j<end_row; j++) {
+                    if (isNotNull(bitmap, j)) {
+                        *(int32_t*)(col_target) = *(base++);
+                    } else {
+                        *(int32_t*)(col_target) = NULL_INT32;
+                    }
+                    col_target += col_step;
                 }
-                col_target += col_step;
-            }
 
+            } else {
+                const int32_t* base = getPageData<int32_t>(current_page) + start_row;
+                for (size_t j=start_row; j<end_row; j++) {
+                    *(int32_t*)(col_target) = *(base++);
+                    col_target += col_step;
+                }
+            }
             n -= end_row-start_row;
             if(n<=0) break;
         }
-
     } else if(col->type==DataType::VARCHAR){
         for(size_t i=std::get<1>(input_column); i<col->pages.size(); i++){
             const Page* current_page = col->pages[i];                       // 要读取的页面
@@ -485,22 +559,35 @@ void gatherContinuousCol(OperatorResultTable::ContinuousColumn input_column, siz
                 const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
                 size_t start_row = i==std::get<1>(input_column) ? std::get<2>(input_column) : 0;  // 本页的起始行
                 size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
-                const char* base = getPageData<char>(current_page);             // 本页数据的起始指针
-                const uint16_t* current_offset = getVarcharOffset(current_page) + getNonNullCount(bitmap, start_row);  // 当前字符串的结尾的偏移量
-                uint16_t last_offset = getNonNullCount(bitmap, start_row)==0 ? 0 : *(current_offset-1);                // 当前字符串的开头的偏移量
+                if (true || __glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
+                    const char* base = getPageData<char>(current_page);             // 本页数据的起始指针
+                    const uint16_t* current_offset = getVarcharOffset(current_page) + getNonNullCount(bitmap, start_row);  // 当前字符串的结尾的偏移量
+                    uint16_t last_offset = getNonNullCount(bitmap, start_row)==0 ? 0 : *(current_offset-1);                // 当前字符串的开头的偏移量
 
-                for (size_t j=start_row; j<end_row; j++) {
-                    if (isNotNull(bitmap, j)) {
+                    for (size_t j=start_row; j<end_row; j++) {
+                        if (isNotNull(bitmap, j)) {
+                            varchar_ptr ptr(base + last_offset,*current_offset - last_offset);
+                            *(uint64_t *)(col_target) = ptr.ptr_;
+                            last_offset = *current_offset;
+                            current_offset ++;
+                        } else {
+                            *(uint64_t *)(col_target) = NULL_VARCHAR;
+                        }
+                        col_target += col_step;
+                    }
+                } else {
+                    const char* base = getPageData<char>(current_page);             // 本页数据的起始指针
+                    const uint16_t* current_offset = getVarcharOffset(current_page) + start_row;  // 当前字符串的结尾的偏移量
+                    uint16_t last_offset = start_row == 0 ? 0 : *(current_offset-1);                // 当前字符串的开头的偏移量
+
+                    for (size_t j=start_row; j<end_row; j++) {
                         varchar_ptr ptr(base + last_offset,*current_offset - last_offset);
                         *(uint64_t *)(col_target) = ptr.ptr_;
                         last_offset = *current_offset;
                         current_offset ++;
-                    } else {
-                        *(uint64_t *)(col_target) = NULL_VARCHAR;
+                        col_target += col_step;
                     }
-                    col_target += col_step;
                 }
-
                 n -= end_row-start_row;
             }
             if(n<=0) break;
@@ -511,8 +598,8 @@ void gatherContinuousCol(OperatorResultTable::ContinuousColumn input_column, siz
 }
 
 
-// 将InstantiatedColumn的由idx指定的n行的值读取出来，并存储到指定位置。
-// input_column: 要读取的ColumnVariant
+// 将ContinuousColumn的由idx指定的n行的值读取出来，并存储到指定位置。
+// input_column: 要读取的ContinuousColumn
 // n: 读取的行数
 // col_target: 存储到的位置
 // col_step: col_target每次移动的步长
@@ -523,25 +610,63 @@ void gatherContinuousColWithIndex(OperatorResultTable::ContinuousColumn input_co
     Page *const * current_page = col->pages.data() + std::get<1>(input_column);
     uint32_t offset = idx[0] + std::get<2>(input_column);
     if(col->type==DataType::INT32) {
+        Page *const * prev_current_page = nullptr;
+        uint32_t prev_offset = offset;
+        size_t nonnull_count = 0;
+        const uint8_t* bitmap = nullptr;
+        uint32_t cur_page_row_num = getRowCount(*current_page);
         for(uint32_t i=0; i<n; i++){
             // 定位到idx[i]所在的Page，和页内偏移
-            while(offset >= getRowCount(*current_page)){
-                offset -= getRowCount(*current_page);
-                current_page++;
+            while(offset >= cur_page_row_num){
+                offset -= cur_page_row_num;
+                cur_page_row_num = getRowCount(*++current_page);
             }
-            const uint8_t* bitmap = getBitmap(*current_page);
+            if (true || __glibc_unlikely(getNonNullCount(*current_page) != getRowCount(*current_page))){
+                if (prev_current_page != current_page){
+                    bitmap = getBitmap(*current_page);
+                    nonnull_count = getNonNullCount(bitmap, offset);
+                    prev_offset = offset;
+                }
 
-            // 取出数据
-            if(isNotNull(bitmap, offset)){
-                const int32_t* data_ptr = getPageData<int32_t>(*current_page) + getNonNullCount(bitmap, offset);
-                *(int32_t*)(col_target) = *data_ptr;
+                // 取出数据
+                if(isNotNull(bitmap, offset)){
+                    if (prev_current_page == current_page){
+    //                    auto correct_nonnull_count = getNonNullCount(bitmap, offset);
+                        nonnull_count += getNonNullCount(bitmap, prev_offset, offset);
+    //                    printf("bits = %u %u\n", offset, prev_offset);
+                    }
+                    const int32_t* data_ptr = getPageData<int32_t>(*current_page) + nonnull_count;
+                    *(int32_t*)(col_target) = *data_ptr;
+                    prev_offset = offset;
+                } else {
+                    *(int32_t*)(col_target) = NULL_INT32;
+                }
+                prev_current_page = current_page;
             } else {
-                *(int32_t*)(col_target) = NULL_INT32;
+                const int32_t* data_ptr = getPageData<int32_t>(*current_page) + offset;
+                *(int32_t*)(col_target) = *data_ptr;
             }
 
             col_target += col_step;
             offset += idx[i+1] - idx[i]; // 假设下标数组idx是递增的
         }
+//        if (__glibc_unlikely(getNonNullCount(*current_page) != getRowCount(*current_page))){
+//
+//        } else {
+//            uint32_t cur_page_row_num = getRowCount(*current_page);
+//            for(uint32_t i=0; i<n; i++){
+//                // 定位到idx[i]所在的Page，和页内偏
+//                while(offset >= cur_page_row_num){
+//                    offset -= cur_page_row_num;
+//                    cur_page_row_num = getRowCount(*++current_page);
+//                }
+//                // 取出数据
+//                const int32_t* data_ptr = getPageData<int32_t>(*current_page) + offset;
+//                *(int32_t*)(col_target) = *data_ptr;
+//                col_target += col_step;
+//                offset += idx[i+1] - idx[i]; // 假设下标数组idx是递增的
+//            }
+//        }
     } else if(col->type==DataType::VARCHAR){
         for(uint32_t i=0; i<n; i++){
             // 定位到idx[i]所在的Page，和页内偏移
