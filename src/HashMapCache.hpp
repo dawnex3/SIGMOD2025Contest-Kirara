@@ -4,6 +4,7 @@
 #include "DataStructure.hpp"
 
 //#define CACHE_LOG
+//#define NO_CACHE
 
 namespace Contest {
 
@@ -132,6 +133,9 @@ public:
         for(size_t i=0; i<plan.inputs.size(); i++){
             inputs_sample_[i].num_rows_=plan.inputs[i].num_rows;
         }
+#ifdef NO_CACHE
+        return;
+#endif
         // 计算各节点哈希值
         calculateNodeHash(plan,plan.root);
     }
@@ -195,6 +199,7 @@ public:
         cache_types_[node_id] = DONT_CACHE;
         if(hashmaps_[node_id]!= nullptr){
             delete hashmaps_[node_id];
+            hashmaps_[node_id] = nullptr;
         }
     }
 
@@ -483,6 +488,13 @@ public:
 
     // 将已经执行完毕的query，加入到缓存当中
     void cacheQuery(QueryCache* query){
+#ifdef NO_CACHE
+        // 释放query中的所有hashmap
+        for(size_t i=0; i<query->getNodeNum(); i++){
+            query->invalidCache(i);
+        }
+        return;
+#endif
         queries_.push_back(query);
         size_t query_size = query->getCacheSize();
 
@@ -519,6 +531,12 @@ public:
                 }
             }
         }
+
+
+        cache_size_ += query->getCacheSize();
+#ifdef CACHE_LOG
+        printf("cached hashmap total size: %lu\n", cache_size_);
+#endif
     }
 
 };
