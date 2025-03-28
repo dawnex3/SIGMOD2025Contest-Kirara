@@ -1,3 +1,4 @@
+#pragma once
 #include "atomic"
 #include "stdlib.h"
 #include "assert.h"
@@ -76,12 +77,31 @@ public:
     Hashmap(const Hashmap&) = delete;
     inline ~Hashmap();
 
+
+    void addAllocations(const std::vector<std::pair<uint8_t*, size_t>>& alloc, size_t entry_size){
+        size_t alloc_size = 0;
+        for(auto [_,n]:alloc){
+            alloc_size += n*entry_size;
+        }
+        std::lock_guard lock(m_);
+        allocations_.insert(allocations_.end(),alloc.begin(),alloc.end());
+        total_mem_size_ += alloc_size;
+    }
+
+    size_t getMemSize() const{
+        return total_mem_size_;
+    }
+
 private:
     inline Hashmap::EntryHeader* ptr(Hashmap::EntryHeader* p);
     inline ptr_t tag(hash_t p);
     //inline v8u64 tag(v8u64 p);
     inline Hashmap::EntryHeader* update(Hashmap::EntryHeader* old,
         Hashmap::EntryHeader* p, hash_t hash);
+
+    std::mutex m_;
+    size_t total_mem_size_{0};
+    std::vector<std::pair<uint8_t*, size_t>> allocations_;
 };
 
 extern Hashmap::EntryHeader notFound;
@@ -91,6 +111,9 @@ inline Hashmap::EntryHeader* Hashmap::end() { return nullptr; }
 inline Hashmap::~Hashmap() {
     //if (entries) mem::free_huge(entries, capacity * sizeof(std::atomic<EntryHeader*>));
     if (entries) free(entries);
+    for(auto [p,_]:allocations_){
+        if(p) free(p);
+    }
 }
 
 inline Hashmap::ptr_t Hashmap::tag(Hashmap::hash_t hash) {
@@ -226,6 +249,8 @@ size_t inline Hashmap::setSize(size_t nrEntries) {
     //entries = static_cast<std::atomic<EntryHeader*>*>(mem::malloc_huge(capacity * sizeof(std::atomic<EntryHeader*>)));
     entries = static_cast<std::atomic<EntryHeader*>*>(malloc(capacity * sizeof(std::atomic<EntryHeader*>)));
     memset((void *)entries,0,capacity * sizeof(std::atomic<EntryHeader*>));
+
+    total_mem_size_ = capacity * sizeof(std::atomic<EntryHeader*>);
     return capacity * loadFactor;
 }
 
