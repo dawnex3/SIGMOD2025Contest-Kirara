@@ -358,8 +358,16 @@ class Hashjoin : public Operator {
 public:
     struct Shared : public SharedState {
         std::atomic<size_t> found_{0};             // 哈希表大小
-        std::atomic<bool> size_is_set_{false};     // 哈希表大小是否已经设置
-        Hashmap hashmap_;
+        Hashmap* hashmap_{nullptr};
+
+        // 构造函数
+        explicit Shared(Hashmap* ptr=nullptr) : found_{0} {
+            if(ptr == nullptr){
+                hashmap_ = new Hashmap();
+            } else {
+                hashmap_ = ptr;
+            }
+        }
     };
 
 private:
@@ -384,13 +392,15 @@ private:
 
     Operator *left_;     // 左侧算子（构建侧）
     size_t left_idx_;                    // 左侧键所在的列号
+    size_t left_col_num_;                // 左侧算子结果的列数
     Operator *right_;    // 右侧算子（探测侧）
     size_t right_idx_;                   // 右侧键所在的列号
 
     size_t ht_entry_size_;  // 哈希表一行的大小。哈希表的一行由一个EntryHeader，加上其余要输出的构建侧列组成
     LocalVector<size_t> build_value_offsets_;   // 构建侧每列相对于EntryHeader的偏移量
 
-    bool is_build_{false};      // 指示哈希表是否已经构建完毕
+    bool is_build_{false};          // 指示哈希表是否已经构建完毕
+    bool store_hashmap_{false};     // 指示是否要保存哈希表
 
     OperatorResultTable right_result_;      // 上次调用right_算子得到的结果
     uint32_t * probe_hashs_;                  // right_result_的键值列的哈希值与键值组合
@@ -402,7 +412,7 @@ private:
     OperatorResultTable last_result_;       // 上一次调用next的返回结果。本次调用修改一些参数就可以返回。
     LocalVector<size_t> output_attrs_;      // 需要输出哪些列
 
-    LocalVector<std::pair<uint8_t*, size_t>> allocations_;  // 存储多个哈希表条目数组<数组指针，数组大小>
+    std::vector<std::pair<uint8_t*, size_t>> allocations_;  // 存储多个哈希表条目数组<数组指针，数组大小>
 
 
     // 专门用于joinSelParallel的循环队列
@@ -420,12 +430,14 @@ public:
 
     Hashjoin(Shared& shared, size_t vec_size, Operator *left, size_t left_idx,
         Operator *right, size_t right_idx,
-        const std::vector<std::tuple<size_t, DataType>>& output_attrs, std::vector<std::tuple<size_t, DataType>> left_attrs)
+        const std::vector<std::tuple<size_t, DataType>>& output_attrs, std::vector<std::tuple<size_t, DataType>> left_attrs,
+        bool is_build=false, bool store_hashmap=false)
     : shared_(shared), vec_size_(vec_size), left_(left), left_idx_(left_idx),
-    right_(right), right_idx_(right_idx){
+    right_(right), right_idx_(right_idx), is_build_(is_build), store_hashmap_(store_hashmap){
         // 计算ht_entry_size_和build_value_offsets_
         // 为了满足对齐的需求，并且让整个entry最小，需要对左表的列顺序重新排列，将int32_t放到前面，uint64_t放到后面
-        build_value_offsets_.resize(left_attrs.size());
+        left_col_num_ = left_attrs.size();
+        build_value_offsets_.resize(left_col_num_);
         ht_entry_size_ = (sizeof(Hashmap::EntryHeader) + 3) & ~3;   // 将EntryHeader大小补齐到4倍数
         for(uint32_t i=0; i<left_attrs.size(); i++){
             if(std::get<1>(left_attrs[i])==DataType::INT32 && i!=left_idx){ // 此处跳过构建侧键值。它存储在EntryHeader里面而不是后面
@@ -491,7 +503,12 @@ public:
                 found += n;
 
                 // 申请一块n*ht_entry_size_大小的内存，存放本批次的哈希表条目
-                uint8_t *ht_entrys = (uint8_t*)local_allocator.allocate(n * ht_entry_size_);
+                uint8_t *ht_entrys;
+                if(store_hashmap_){
+                    ht_entrys = (uint8_t*)malloc(n * ht_entry_size_);
+                } else {
+                    ht_entrys = (uint8_t*)local_allocator.allocate(n * ht_entry_size_);
+                }
                 allocations_.emplace_back(ht_entrys, n);
 
                 // 从数据源OperatorResultTable取出键值，计算键的哈希值并与键本身一起存储到EntryHeader当中。
@@ -514,7 +531,7 @@ public:
 #ifdef DEBUG_LOG
                 printf("join %zu: build_rows=%lu\n",shared_.get_operator_id()-1,total_found);
 #endif
-                if (total_found) shared_.hashmap_.setSize(total_found);
+                if (total_found) shared_.hashmap_->setSize(total_found);
             });
             profile_guard.resume();
             auto total_found = shared_.found_.load();
@@ -526,8 +543,11 @@ public:
 
             // 将allocations中的所有哈希表条目插入哈希表
             for (auto [ht_entrys, n] : allocations_) {
-                shared_.hashmap_.insertAll_tagged(
+                shared_.hashmap_->insertAll_tagged(
                     reinterpret_cast<Hashmap::EntryHeader*>(ht_entrys), n, ht_entry_size_);
+            }
+            if(store_hashmap_){
+                shared_.hashmap_->addAllocations(allocations_,ht_entry_size_);
             }
             is_build_ = true;
             profile_guard.pause();
@@ -577,17 +597,16 @@ public:
             if (n == 0) continue;
             // 物化最终结果。将匹配的(Entry*, pos)中，左侧的值收集起来，右侧对应的行的值也收集起来
             last_result_.num_rows_ = n;
-            size_t left_column_num = left_->resultColumnNum();
             for(size_t out_idx=0;out_idx<output_attrs_.size();out_idx++) {
                 auto column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[out_idx]);
                 size_t in_idx = output_attrs_[out_idx];
-                if (in_idx < left_column_num) { // 如果是构建表
+                if (in_idx < left_col_num_) { // 如果是构建表
                     gatherEntry(column, n, build_value_offsets_[in_idx]);
-                } else if(in_idx - left_column_num != right_idx_ ){  // 如果是探测表的非键值侧
-                    gatherCol<true>(right_result_.columns_[in_idx - left_column_num], n,
+                } else if(in_idx - left_col_num_ != right_idx_ ){  // 如果是探测表的非键值侧
+                    gatherCol<true>(right_result_.columns_[in_idx - left_col_num_], n,
                         (uint8_t*)column.second, column.first == DataType::INT32 ? 4 : 8, probe_matches_);
                 } else {    // 如果是探测表的键值侧
-                    OperatorResultTable::ColumnVariant key_col = right_result_.columns_[in_idx - left_column_num];
+                    OperatorResultTable::ColumnVariant key_col = right_result_.columns_[in_idx - left_col_num_];
                     std::visit([&](auto&& key_col) {
                         using T = std::decay_t<decltype(key_col)>;
                         if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
@@ -879,7 +898,7 @@ public:
             uint32_t hash = probe_hashs_[i];
             uint32_t key = key_source_[i];
             auto tmp = 0;
-            for (auto entry = shared_.hashmap_.find_chain_tagged(hash); entry != nullptr; entry = entry->next) {
+            for (auto entry = shared_.hashmap_->find_chain_tagged(hash); entry != nullptr; entry = entry->next) {
                 tmp++;
                 if (entry->key == key) {
                     build_matches_[found] = entry;              // 记录左表（哈希表）匹配的EntryHeader
@@ -924,9 +943,9 @@ public:
                 v8u32 hashDense = *reinterpret_cast<const v8u32*>(probe_hashs_ + i);
 
                 // --- 2. 在哈希表中查找对应链 ---
-                auto entries = shared_.hashmap_.find_chain_tagged(hashDense);
+                auto entries = shared_.hashmap_->find_chain_tagged(hashDense);
 //                for (int k = 0 ; k < 8; ++k){
-//                    if (entries[k] != reinterpret_cast<uint64_t>(shared_.hashmap_.find_chain_tagged(hashDense[k])))
+//                    if (entries[k] != reinterpret_cast<uint64_t>(shared_.hashmap_->find_chain_tagged(hashDense[k])))
 //                        printf("ERROR!\n");
 //                }
 
@@ -980,7 +999,7 @@ public:
             } // for i
             for (; i < cont_.num_probe_; ++i) {
                 auto hash = probe_hashs_[i];
-                auto entry = shared_.hashmap_.find_chain_tagged(hash);
+                auto entry = shared_.hashmap_->find_chain_tagged(hash);
                 if (entry != Contest::Hashmap::end()) {
                     if (entry->hash == hash) {
                        build_matches_[found] = entry;
@@ -1044,7 +1063,7 @@ public:
 //        if (followup == followupWrite) { // 当循环队列为空的时候
 //            for (size_t i = 0, end = cont_.num_probe_; i < end; ++i) {    // 遍历该批次所有探测元组
 //                auto hk = probe_hks_[i];
-//                auto entry = shared_.hashmap_.find_chain_tagged(hk>>32);
+//                auto entry = shared_.hashmap_->find_chain_tagged(hk>>32);
 //                if (entry != nullptr) {        // 匹配项添加到buildMatches和probeMatches
 //                    if (entry->hash_and_key == hk) {
 //                        build_matches_[found] = entry;
