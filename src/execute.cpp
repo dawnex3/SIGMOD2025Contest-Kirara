@@ -499,13 +499,18 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
                             shared, vector_size, build_op, build_attr,
                             probe_op, probe_attr, output_attrs, plan.nodes[build_node].output_attrs,is_build,store_hash);
                         return hash_join;
-                    } else {                   // 使用native join
+                    } else {                   // 使用naive join
                         auto& shared = shared_manager.get<Naivejoin::Shared>(node_idx + 1); //共享状态id设为node_idx+1
                         ScanNode one_line_scan = std::get<ScanNode>(plan.nodes[build_node].data);
-                        const ColumnarTable& table = plan.inputs[one_line_scan.base_table_id];
+                        const ColumnarTable* table;
+                        if(input!= nullptr){
+                            table = &(*input)[one_line_scan.base_table_id];
+                        } else {
+                            table = &plan.inputs[one_line_scan.base_table_id];
+                        }
                         std::vector<const Column*> columns;
                         for(auto [col_idx, _]: plan.nodes[build_node].output_attrs){
-                            columns.push_back(&table.columns[col_idx]);
+                            columns.push_back(&table->columns[col_idx]);
                         }
                         Operator *naive_join = new (local_allocator.allocate(sizeof(Naivejoin))) Naivejoin(
                             shared, vector_size, probe_op, probe_attr, columns, build_attr, output_attrs);
@@ -514,16 +519,21 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
                 }
             } else if constexpr (std::is_same_v<T, ScanNode>){
                 // 如果是scan节点
-                const ColumnarTable& table = plan.inputs[value.base_table_id];
-                if (table.num_rows == 1 && is_build_side){
+                const ColumnarTable* table;
+                if(input!= nullptr){
+                    table = &(*input)[value.base_table_id];
+                } else {
+                    table = &plan.inputs[value.base_table_id];
+                }
+                size_t row_num = table->num_rows;
+                if (row_num == 1 && is_build_side){
                     return nullptr;
                 }
                 auto& shared = shared_manager.get<Scan::Shared>(node_idx + 1); //共享状态id设为node_idx+1
-                size_t row_num = table.num_rows;
                 // 填充数据源
                 std::vector<const Column*> columns;
                 for(auto [col_idx, _]: node.output_attrs){
-                    columns.push_back(&table.columns[col_idx]);
+                    columns.push_back(&table->columns[col_idx]);
                 }
                 Scan *scan = new (local_allocator.allocate(sizeof(Scan))) Scan(shared,row_num,vector_size,columns);
 
@@ -593,8 +603,11 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     std::condition_variable finish_cv;
     std::mutex finish_mtx;
 
+    //printf("plan.nodes.size()==%zu, plan.root=%zu\n",plan.nodes.size(),plan.root);
     if (++exec_cnt == 113) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
+        if(plan.nodes.size()==27 && plan.root==26){
+            std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
+        }
     }
 
     // 启动所有线程
