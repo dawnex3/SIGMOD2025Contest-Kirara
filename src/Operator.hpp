@@ -548,7 +548,7 @@ public:
                     allocations_.~vector();
 #ifdef DEBUG_LOG
                     printf("join %zu: output_rows=%ld, probe_rows=%ld\n",shared_.get_operator_id()-1,output_rows_,probe_rows_);
-//                    std::cout<<table_str<<std::endl;
+                    std::cout<<table_str<<std::endl;
 //                    std::ofstream log("log_false.txt", std::ios::app);
 //                    log << "join "<< shared_.get_operator_id()-1 <<" output rows: " << output_rows_ << ", details:\n";
 //                    log << table_str <<std::endl;
@@ -602,7 +602,7 @@ public:
             profile_guard.add_output_row_count(n);
 #ifdef DEBUG_LOG
             output_rows_ += n;
-//            table_str.append(last_result_.toString(false));
+            table_str.append(last_result_.toString(true));
 #endif
             return last_result_;
         }
