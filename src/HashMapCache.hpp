@@ -4,7 +4,7 @@
 #include "DataStructure.hpp"
 
 //#define CACHE_LOG
-#define NO_CACHE
+//#define NO_CACHE
 
 namespace Contest {
 
@@ -129,11 +129,12 @@ public:
     enum CacheType{DONT_CACHE, NEED_CACHE, USE_CACHE, OWN_CACHE};
 
     QueryCache(const Plan& plan, const std::vector<ColumnarTable>* input=nullptr)
-    : nodes_(plan.nodes), inputs_sample_(plan.inputs.size()), root(plan.root), hashes_(plan.nodes.size(),INVALID_HASH),
+    : nodes_(plan.nodes), root(plan.root), hashes_(plan.nodes.size(),INVALID_HASH),
     cache_types_(plan.nodes.size(),DONT_CACHE), node_depth_(plan.nodes.size(),0), hashmaps_(plan.nodes.size(),nullptr){
         if(input==nullptr){
             input = &plan.inputs;
         }
+        inputs_sample_.resize(input->size());
         for(size_t i=0; i<input->size(); i++){
             inputs_sample_[i].num_rows_=(*input)[i].num_rows;
         }
