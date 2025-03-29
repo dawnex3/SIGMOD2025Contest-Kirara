@@ -273,6 +273,7 @@ public:
             multi_result_ = multi_->next();
             num_probe_ = multi_result_.num_rows_;
             if (num_probe_ == 0) {
+                columns_.~vector();
 #ifdef DEBUG_LOG
                 printf("naive join %zu: output_rows=%ld, probe_rows=%ld\n",shared_.get_operator_id()-1,output_rows_,probe_rows_);
 #endif
@@ -340,12 +341,7 @@ public:
         Hashmap* hashmap_{nullptr};
 
         // 构造函数
-        explicit Shared(Hashmap* ptr=nullptr) : found_{0} {
-            if(ptr == nullptr){
-                hashmap_ = new Hashmap();
-            } else {
-                hashmap_ = ptr;
-            }
+        explicit Shared(Hashmap* ptr=nullptr) : found_{0}, hashmap_{ptr} {
         }
     };
 
@@ -548,6 +544,8 @@ public:
 #endif
                 if (cont_.num_probe_ == 0) {
                     last_result_.num_rows_ = 0;
+                    // 析构std::vector
+                    allocations_.~vector();
 #ifdef DEBUG_LOG
                     printf("join %zu: output_rows=%ld, probe_rows=%ld\n",shared_.get_operator_id()-1,output_rows_,probe_rows_);
 //                    std::cout<<table_str<<std::endl;
