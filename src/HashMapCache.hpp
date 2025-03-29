@@ -3,7 +3,7 @@
 #include "HashMap.hpp"
 #include "DataStructure.hpp"
 
-//#define CACHE_LOG
+#define CACHE_LOG
 //#define NO_CACHE
 
 namespace Contest {
