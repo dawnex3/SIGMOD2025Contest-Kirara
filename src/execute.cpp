@@ -589,13 +589,12 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     QueryCache* query_cache = cache_manager.getQuery(plan);           // 哈希表缓存
     global_profiler = new Profiler(thread_num);
     global_mempool.reset();
-    static bool need_sleep = true;
+    static int exec_cnt = 0;
     std::condition_variable finish_cv;
     std::mutex finish_mtx;
 
-    if (need_sleep) {
+    if (++exec_cnt == 113) {
         std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
-        need_sleep = false;
     }
 
     // 启动所有线程
