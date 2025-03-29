@@ -59,8 +59,9 @@ public:
 
         // 采样一个列，生成哈希值。如果这个列是VARCHAR类型，不用采样了，哈希值设为无效。
         ColumnSample(const Column& column, size_t row_num) : type_(column.type), page_num_(column.pages.size()){
-            if(type_!=DataType::INT32){
+            if(type_!=DataType::INT32 || page_num_ == 0){
                 hash_ = INVALID_HASH;
+                return;
             }
             // 等间距的采样出SAMPLE_SIZE个数据。如果page_num_>=SAMPLE_SIZE，被采样的每个page都不重复，此时采样pages的开头位置
             if(page_num_ >= SAMPLE_SIZE){
