@@ -4,6 +4,8 @@
 #include "assert.h"
 #include "hardware.h"
 
+#define PREFETCH
+
 namespace Contest {
 #define NULL_HASH (1642857263)  // 这是NULL_INT32算出的哈希值（祈祷它不会发生碰撞）
 #if defined(SPC__SUPPORTS_AVX2) || defined(SPC__SUPPORTS_AVX) || \
@@ -59,6 +61,14 @@ public:
     inline size_t setSize(size_t nrEntries);
     /// Removes all elements from the hashtable
     inline void clear();
+
+    template <size_t rw, size_t locality>
+    inline void prefetchBucket(hash_t hash) {
+        // 从 entries 数组中加载实际桶指针（使用 relaxed 内存序即可）
+        EntryHeader* bucket_ptr = entries[hash & mask].load(std::memory_order_relaxed);
+        __builtin_prefetch(bucket_ptr, rw, locality);
+    }
+
 
 #ifdef SIMD_SIZE
     static inline v8u64 tag(v8u32 p);
@@ -229,7 +239,17 @@ template <bool concurrentInsert>
 void inline Hashmap::insertAll_tagged(EntryHeader* first, size_t n,
     size_t step) {
     EntryHeader* e = first;
+#ifdef PREFETCH
+    uint8_t* prefetch_hash = reinterpret_cast<uint8_t*>(first) + offsetof(Hashmap::EntryHeader, hash) + 10 * step;
+#endif
     for (size_t i = 0; i < n; ++i) {
+#ifdef PREFETCH
+        // 如果还有足够的后续元素，预取较远一条记录对应桶的数据
+        if (i + 10 < n) {
+            prefetchBucket<1, 1>(*((hash_t*)prefetch_hash));
+            prefetch_hash += step;
+        }
+#endif
         insert_tagged<concurrentInsert>(e, static_cast<hash_t>(e->hash));
         e = reinterpret_cast<EntryHeader*>(reinterpret_cast<uint8_t*>(e) + step);
     }
