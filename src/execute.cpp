@@ -656,7 +656,7 @@ void* build_context() {
     global_profiler = new Profiler(1);
     global_profiler->set_thread_id(0);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds (135600));   // 让cpu休息一下吧 :)
+    std::this_thread::sleep_for(std::chrono::milliseconds (25000));   // 让cpu休息一下吧 :)
     global_mempool.init();
     
     global_profiler->print_profiles();
