@@ -440,7 +440,7 @@ void printPlanTree(const Plan &plan) {
 //}
 
 
-Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& shared_manager, bool is_build_side, QueryCache* query_cache, size_t vector_size = 1024){
+Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& shared_manager, bool is_build_side, QueryCache* query_cache, size_t vector_size = 1024, const std::vector<ColumnarTable>* input=nullptr){
     auto& node = plan.nodes[node_idx];
     return std::visit(
         [&](const auto& value)-> Operator *{
@@ -456,7 +456,6 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
                 } else if(type==QueryCache::OWN_CACHE){
                     store_hash=true;
                 }
-                auto& shared = shared_manager.get<Hashjoin::Shared>(node_idx + 1, hashmap); //共享状态id设为node_idx+1
 
                 // 根据左右侧构建，获取构建侧和探测侧的信息
                 size_t build_node, probe_node, build_attr, probe_attr;
@@ -484,6 +483,7 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
                 probe_op = getOperator(plan, probe_node, shared_manager, false, query_cache, vector_size);
                 if(is_build){   // 使用缓存哈希表
                     build_op = nullptr;
+                    auto& shared = shared_manager.get<Hashjoin::Shared>(node_idx + 1, hashmap); //共享状态id设为node_idx+1
                     Operator *hash_join = new (local_allocator.allocate(sizeof(Hashjoin))) Hashjoin(
                         shared, vector_size, build_op, build_attr,
                         probe_op, probe_attr, output_attrs, plan.nodes[build_node].output_attrs,is_build,store_hash);
@@ -491,11 +491,13 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
                 } else {
                     build_op = getOperator(plan, build_node, shared_manager, true, query_cache, vector_size);
                     if(build_op!=nullptr){     // 不使用缓存哈希表的hash join
+                        auto& shared = shared_manager.get<Hashjoin::Shared>(node_idx + 1, hashmap); //共享状态id设为node_idx+1
                         Operator *hash_join = new (local_allocator.allocate(sizeof(Hashjoin))) Hashjoin(
                             shared, vector_size, build_op, build_attr,
                             probe_op, probe_attr, output_attrs, plan.nodes[build_node].output_attrs,is_build,store_hash);
                         return hash_join;
                     } else {                   // 使用native join
+                        auto& shared = shared_manager.get<Naivejoin::Shared>(node_idx + 1); //共享状态id设为node_idx+1
                         ScanNode one_line_scan = std::get<ScanNode>(plan.nodes[build_node].data);
                         const ColumnarTable& table = plan.inputs[one_line_scan.base_table_id];
                         std::vector<const Column*> columns;
@@ -503,7 +505,7 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
                             columns.push_back(&table.columns[col_idx]);
                         }
                         Operator *naive_join = new (local_allocator.allocate(sizeof(Naivejoin))) Naivejoin(
-                            vector_size, probe_op, probe_attr, columns, build_attr, output_attrs);
+                            shared, vector_size, probe_op, probe_attr, columns, build_attr, output_attrs);
                         return naive_join;
                     }
                 }
@@ -511,7 +513,7 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
                 // 如果是scan节点
                 const ColumnarTable& table = plan.inputs[value.base_table_id];
                 if (table.num_rows == 1 && is_build_side){
-                    //return nullptr;
+                    return nullptr;
                 }
                 auto& shared = shared_manager.get<Scan::Shared>(node_idx + 1); //共享状态id设为node_idx+1
                 size_t row_num = table.num_rows;
@@ -529,10 +531,10 @@ Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& sha
 }
 
 // 将原来的计划，翻译为物理执行计划树，返回树的根节点
-ResultWriter *getPlan(const Plan& plan, SharedStateManager& shared_manager, size_t vector_size = 1024, QueryCache* query_cache=nullptr){
+ResultWriter *getPlan(const Plan& plan, SharedStateManager& shared_manager, size_t vector_size = 1024, QueryCache* query_cache=nullptr, const std::vector<ColumnarTable>* input=nullptr){
     // 从plan的根节点进入，递归创建Operator
     ProfileGuard profile_guard(global_profiler, "make plan");
-    Operator *op = getOperator(plan, plan.root, shared_manager, false, query_cache, vector_size);
+    Operator *op = getOperator(plan, plan.root, shared_manager, false, query_cache, vector_size, input);
     // ResultWriter算子的共享状态id设为0，其余算子的共享状态id设为其在plan.nodes中的id+1
     auto& shared = shared_manager.get<ResultWriter::Shared>(0,plan.nodes[plan.root].output_attrs);
     ResultWriter *result_writer = new (local_allocator.allocate(sizeof(ResultWriter))) ResultWriter(shared, op);
@@ -592,6 +594,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 
         if (i == thread_num - 1) {
             [&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
+
                 local_allocator.reuse();
                 global_profiler->set_thread_id(i);
                 ProfileGuard profile_guard(global_profiler, "execute");
@@ -607,8 +610,8 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
                 if (is_last) result = std::move(result_writer->shared_.output_);
             }();
         } else {
-            threads.emplace_back(
-                [&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
+            threads.emplace_back([&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
+
                 local_allocator.reuse();
                 global_profiler->set_thread_id(i);
                 ProfileGuard profile_guard(global_profiler, "execute");

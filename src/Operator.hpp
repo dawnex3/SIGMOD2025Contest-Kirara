@@ -134,7 +134,15 @@ public:
 
 
 class Naivejoin: public Operator {
+public:
+    struct Shared : public SharedState {
+        // 这个结构体里面什么也没有
+    };
 private:
+
+    Shared& shared_;
+
+
     uint32_t vec_size_;        // 批次大小
 
     std::vector<const Column*> columns_;
@@ -153,11 +161,16 @@ private:
     OperatorResultTable last_result_;       // 上一次调用next的返回结果。本次调用修改一些参数就可以返回。
     LocalVector<size_t> output_attrs_;      // 需要输出哪些列
 
+#ifdef DEBUG_LOG
+    size_t      probe_rows_{0};
+    size_t      output_rows_{0};
+#endif
+
 public:
-    Naivejoin(size_t vec_size, Operator *multi, size_t multi_idx,
+    Naivejoin(Shared& shared, size_t vec_size, Operator *multi, size_t multi_idx,
         std::vector<const Column*> columns, size_t one_idx,
         const std::vector<std::tuple<size_t, DataType>>& output_attrs)
-    : vec_size_(vec_size), multi_(multi), multi_idx_(multi_idx), columns_(std::move(columns)), one_idx_(one_idx){
+        :shared_(shared), vec_size_(vec_size), multi_(multi), multi_idx_(multi_idx), columns_(std::move(columns)), one_idx_(one_idx){
 
         probe_matches_ = (uint32_t*)local_allocator.allocate(vec_size_ * sizeof(uint32_t));
         probe_keys_ = (uint32_t*)local_allocator.allocate(vec_size_ * sizeof(uint32_t));
@@ -169,27 +182,29 @@ public:
                 void* col_buffer = local_allocator.allocate(vec_size*sizeof(int32_t));
                 last_result_.columns_.emplace_back(std::make_pair(col_type, col_buffer));
 
-                if(col_idx <= columns_.size()){
+                if(col_idx < columns_.size()){
                     int32_t value = 0;
                     gatherContinuousCol(std::make_tuple(columns_[col_idx],0,0),1,
                         reinterpret_cast<uint8_t*>(&value),0);
                     std::fill_n(static_cast<int32_t*>(col_buffer), vec_size, value);
-
-                    if(col_idx==one_idx){
-                        one_key_value_ = static_cast<uint32_t>(value);
-                    }
                 }
             } else {
                 void* col_buffer = local_allocator.allocate(vec_size*sizeof(uint64_t));
                 last_result_.columns_.emplace_back(std::make_pair(col_type, col_buffer));
 
-                if(col_idx <= columns_.size()){
+                if(col_idx < columns_.size()){
                     uint64_t value = 0;
                     gatherContinuousCol(std::make_tuple(columns_[col_idx],0,0),1,
                         reinterpret_cast<uint8_t*>(&value),0);
                     std::fill_n(static_cast<uint64_t*>(col_buffer), vec_size, value);
                 }
             }
+        }
+
+        // 设置one_key_value_值
+        {
+            gatherContinuousCol(std::make_tuple(columns_[one_idx],0,0),1,
+                reinterpret_cast<uint8_t*>(&one_key_value_),0);
         }
     }
 
@@ -258,6 +273,9 @@ public:
             multi_result_ = multi_->next();
             num_probe_ = multi_result_.num_rows_;
             if (num_probe_ == 0) {
+#ifdef DEBUG_LOG
+                printf("naive join %zu: output_rows=%ld, probe_rows=%ld\n",shared_.get_operator_id()-1,output_rows_,probe_rows_);
+#endif
                 last_result_.num_rows_ = 0;
                 return last_result_;
             }
@@ -272,6 +290,10 @@ public:
                 }
             }, key_col);
 
+#ifdef DEBUG_LOG
+            probe_rows_ += num_probe_;
+#endif
+
             uint32_t n;
             n = joinAllNaive();
             //n = joinAllNaiveSIMD();
@@ -283,6 +305,9 @@ public:
 //                n = joinAllSIMD();
 #endif
             if (n == 0) continue;
+#ifdef DEBUG_LOG
+            output_rows_ += n;
+#endif
 
             // 物化最终结果。
             size_t one_column_num = columns_.size();
@@ -290,7 +315,9 @@ public:
             for(size_t out_idx=0;out_idx<output_attrs_.size();out_idx++) {
                 auto column = std::get<OperatorResultTable::InstantiatedColumn>(last_result_.columns_[out_idx]);
                 size_t in_idx = output_attrs_[out_idx];
-                if(in_idx != multi_idx_ + one_column_num){  // 如果是探测表的非键值侧
+                if(in_idx < one_column_num){                    // 如果是构建侧
+                    continue;
+                }else if(in_idx != multi_idx_ + one_column_num){  // 如果是探测表的非键值侧
                     gatherCol<true>(multi_result_.columns_[in_idx - one_column_num], n,
                         (uint8_t*)column.second, column.first == DataType::INT32 ? 4 : 8, probe_matches_);
                 } else {    // 如果是探测表的键值侧，始终从key_source_中提取
