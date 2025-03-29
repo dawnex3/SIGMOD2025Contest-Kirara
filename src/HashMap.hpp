@@ -4,7 +4,7 @@
 #include "assert.h"
 #include "hardware.h"
 
-#define PREFETCH
+//#define PREFETCH
 
 namespace Contest {
 #define NULL_HASH (1642857263)  // 这是NULL_INT32算出的哈希值（祈祷它不会发生碰撞）
