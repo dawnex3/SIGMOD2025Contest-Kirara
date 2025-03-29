@@ -23,7 +23,7 @@
 #include "MemoryPool.hpp"
 
 namespace Contest {
-#define DEBUG_LOG
+//#define DEBUG_LOG
 
 class Operator {
 public:
