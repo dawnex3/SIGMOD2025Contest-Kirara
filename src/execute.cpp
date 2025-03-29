@@ -603,12 +603,12 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     std::condition_variable finish_cv;
     std::mutex finish_mtx;
 
-    //printf("plan.nodes.size()==%zu, plan.root=%zu\n",plan.nodes.size(),plan.root);
-    if (++exec_cnt == 113) {
-        if(plan.nodes.size()==27 && plan.root==26){
-            std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
-        }
-    }
+//    //printf("plan.nodes.size()==%zu, plan.root=%zu\n",plan.nodes.size(),plan.root);
+//    if (++exec_cnt == 113) {
+//        if(plan.nodes.size()==27 && plan.root==26){
+//            std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
+//        }
+//    }
 
     // 启动所有线程
     for (size_t i = 0; i < thread_num; ++i) {
@@ -656,9 +656,8 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     global_profiler->print_profiles();
     delete global_profiler;
     global_profiler = nullptr;
-    // delete global_mempool;
-    // global_mempool = nullptr;
-    // 1.85 1.48 ??? 2.71
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));   // 让cpu休息一下吧 :)
     return result;
 }
 
