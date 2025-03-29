@@ -16,9 +16,9 @@
 #include "hardware.h"
 #include "Profiler.hpp"
 
-#ifdef SPC__PPC64LE
-#define NO_USE_MEMPOOL
-#endif
+//#ifdef SPC__PPC64LE
+//#define NO_USE_MEMPOOL
+//#endif
 
 namespace mem {
 inline void* malloc_huge(size_t size) {
