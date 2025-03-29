@@ -14,6 +14,7 @@
 #include <vector>
 #include <mutex>
 #include "hardware.h"
+#include "Profiler.hpp"
 
 #ifdef SPC__PPC64LE
 #define NO_USE_MEMPOOL
@@ -56,24 +57,27 @@ private:
 #endif
 
 public:
-  GlobalPool();
-  ~GlobalPool();
+  GlobalPool() = default;
+  ~GlobalPool() = default;
   GlobalPool(GlobalPool &&) = delete;
   GlobalPool(const GlobalPool &) = delete;
 
+  void init();
+  void destroy();
   void *allocate(size_t size);
   void reset();
 } global_mempool;
 
-inline GlobalPool::GlobalPool() {
+inline void GlobalPool::init() {
 #ifndef NO_USE_MEMPOOL
-  start_ = newChunkWithInit(pool_size_);
+  ProfileGuard profile_guard(global_profiler, "GlobalPool::init");
+  start_ = newChunk(pool_size_);
   end_ = start_ + pool_size_;
   next_ = start_;
 #endif
 }
 
-inline GlobalPool::~GlobalPool() {
+inline void GlobalPool::destroy() {
 #ifndef NO_USE_MEMPOOL
   mem::free_huge(start_, pool_size_);
   start_ = nullptr;
@@ -149,10 +153,10 @@ private:
   GlobalPool *memory_source_ = nullptr;
 
 public:
-  Allocator() { setSource(&global_mempool); }
+  Allocator() = default;
   Allocator(Allocator &&) = default;
   Allocator(const Allocator &) = delete;
-  GlobalPool *setSource(GlobalPool *s);
+  GlobalPool *init(GlobalPool *s);
   inline void *allocate(size_t size);
   void reuse();
 } local_allocator;
@@ -174,7 +178,7 @@ inline void *Allocator::allocate(size_t size) {
   return alloc;
 }
 
-inline GlobalPool *Allocator::setSource(GlobalPool *source) {
+inline GlobalPool *Allocator::init(GlobalPool *source) {
   auto previousSource = memory_source_;
   memory_source_ = source;
   if (source) {

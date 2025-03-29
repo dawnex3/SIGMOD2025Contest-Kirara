@@ -594,7 +594,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 
         if (i == thread_num - 1) {
             [&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
-
+                local_allocator.init(&global_mempool);
                 local_allocator.reuse();
                 global_profiler->set_thread_id(i);
                 ProfileGuard profile_guard(global_profiler, "execute");
@@ -611,7 +611,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
             }();
         } else {
             threads.emplace_back([&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
-
+                local_allocator.init(&global_mempool);
                 local_allocator.reuse();
                 global_profiler->set_thread_id(i);
                 ProfileGuard profile_guard(global_profiler, "execute");
@@ -647,17 +647,25 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     global_profiler = nullptr;
     // delete global_mempool;
     // global_mempool = nullptr;
-
-     std::this_thread::sleep_for(std::chrono::milliseconds (1200));   // 让cpu休息一下吧 :)
     // 1.85 1.48 ??? 2.71
     return result;
 }
 
 
 void* build_context() {
+    global_profiler = new Profiler(1);
+    global_profiler->set_thread_id(0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds (25000));   // 让cpu休息一下吧 :)
+    global_mempool.init();
+    
+    global_profiler->print_profiles();
+    delete global_profiler;
+    global_profiler = nullptr;
     return nullptr;
 }
 
-void destroy_context([[maybe_unused]] void* context) {}
-
+void destroy_context([[maybe_unused]] void* context) {
+    global_mempool.destroy();
+}
 } // namespace Contest
