@@ -647,14 +647,13 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     global_profiler = nullptr;
     // delete global_mempool;
     // global_mempool = nullptr;
-
-     std::this_thread::sleep_for(std::chrono::milliseconds (1200));   // 让cpu休息一下吧 :)
     // 1.85 1.48 ??? 2.71
     return result;
 }
 
 
 void* build_context() {
+    std::this_thread::sleep_for(std::chrono::milliseconds (135600));   // 让cpu休息一下吧 :)
     return nullptr;
 }
 
