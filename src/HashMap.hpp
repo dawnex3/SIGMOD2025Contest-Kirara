@@ -111,7 +111,7 @@ inline Hashmap::EntryHeader* Hashmap::end() { return nullptr; }
 inline Hashmap::~Hashmap() {
     //if (entries) mem::free_huge(entries, capacity * sizeof(std::atomic<EntryHeader*>));
     if (entries) free(entries);
-    for(auto [p,_]:allocations_){
+    for(auto [p,n]:allocations_){
         if(p) free(p);
     }
 }

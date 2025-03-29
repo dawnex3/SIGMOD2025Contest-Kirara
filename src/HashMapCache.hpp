@@ -127,17 +127,29 @@ public:
     // OWN_CACHE: 拥有缓存。此时对应的hashmaps_中存储的是该语句执行中生成的哈希表
     enum CacheType{DONT_CACHE, NEED_CACHE, USE_CACHE, OWN_CACHE};
 
-    QueryCache(const Plan& plan)
+    QueryCache(const Plan& plan, const std::vector<ColumnarTable>* input=nullptr)
     : nodes_(plan.nodes), inputs_sample_(plan.inputs.size()), root(plan.root), hashes_(plan.nodes.size(),INVALID_HASH),
     cache_types_(plan.nodes.size(),DONT_CACHE), node_depth_(plan.nodes.size(),0), hashmaps_(plan.nodes.size(),nullptr){
-        for(size_t i=0; i<plan.inputs.size(); i++){
-            inputs_sample_[i].num_rows_=plan.inputs[i].num_rows;
+        if(input==nullptr){
+            input = &plan.inputs;
+        }
+        for(size_t i=0; i<input->size(); i++){
+            inputs_sample_[i].num_rows_=(*input)[i].num_rows;
         }
 #ifdef NO_CACHE
         return;
 #endif
         // 计算各节点哈希值
-        calculateNodeHash(plan,plan.root);
+        calculateNodeHash(plan,plan.root,input);
+    }
+
+    ~QueryCache(){
+        // 释放所有的哈希表
+        for(size_t i=0; i<nodes_.size(); i++){
+            if(cache_types_[i]!=USE_CACHE && hashmaps_[i]!=nullptr){
+                delete hashmaps_[i];
+            }
+        }
     }
 
     void print() const{
@@ -196,11 +208,11 @@ public:
 
     // 无效化该节点上的缓存（如果有）
     inline void invalidCache(size_t node_id){
-        cache_types_[node_id] = DONT_CACHE;
-        if(hashmaps_[node_id]!= nullptr){
+        if(cache_types_[node_id] != USE_CACHE && hashmaps_[node_id]!= nullptr){
             delete hashmaps_[node_id];
             hashmaps_[node_id] = nullptr;
         }
+        cache_types_[node_id] = DONT_CACHE;
     }
 
     inline bool isNaiveJoin(size_t node_id){
@@ -359,7 +371,7 @@ private:
     }
 
     // 计算nodes_中node_id节点的哈希值，基于当前QueryCache中已经计算的节点的哈希值
-    uint64_t calculateNodeHash(const Plan& plan, size_t node_id){
+    uint64_t calculateNodeHash(const Plan& plan, size_t node_id, const std::vector<ColumnarTable>* input){
         if(hashes_[node_id] != INVALID_HASH){
             return hashes_[node_id];
         }
@@ -384,7 +396,7 @@ private:
                 std::vector<uint64_t> col_hashes;
                 for(auto [col_id, _] : node_output){
                     // 对该列做采样，存储到TableSample中
-                    const Column& column = plan.inputs[table_id].columns[col_id];
+                    const Column& column = (*input)[table_id].columns[col_id];
                     addColumnSamples(table_id, col_id, column);
                     col_hashes.push_back(getColumnHash(table_id, col_id));
                 }
@@ -396,8 +408,8 @@ private:
                 return scan_hash;
             } else if constexpr (std::is_same_v<T, JoinNode>) {
                 // 分获取左右算子的哈希值，如果任意一侧无效，则设置该节点哈希值为无效
-                uint64_t left_hash = calculateNodeHash(plan,node_data.left);
-                uint64_t right_hash = calculateNodeHash(plan,node_data.right);
+                uint64_t left_hash = calculateNodeHash(plan,node_data.left,input);
+                uint64_t right_hash = calculateNodeHash(plan,node_data.right,input);
                 node_depth_[node_id] = node_data.build_left ? node_depth_[node_data.left] : node_depth_[node_data.right];
                 node_depth_[node_id] ++;
                 // 判断本join的哈希表是否需要被被缓存
@@ -445,12 +457,19 @@ class CacheManager{
     size_t cache_size_{0};     // 记录了hashmap_caches_中保存的所有哈希表的总字节数目
 
 public:
+    ~CacheManager(){
+        // 释放所有申请的内存
+        for(auto query:queries_){
+            delete query;
+        }
+    }
+
     // 生成一条语句。为这条语句使用可能的缓存。
-    QueryCache* getQuery(const Plan& plan){
-        QueryCache* query = new QueryCache(plan);
+    QueryCache* getQuery(const Plan& plan, const std::vector<ColumnarTable>* input=nullptr){
+        QueryCache* query = new QueryCache(plan,input);
 
         // 检查query的每个join节点的哈希表是否可以缓存
-        for(size_t i=0; i<plan.nodes.size(); i++){
+        for(size_t i=0; i<query->getNodeNum(); i++){
             // 这是为了naive join的适配
             if(query->isNaiveJoin(i)){
                 query->invalidCache(i);
@@ -474,9 +493,15 @@ public:
                 }
                 // 没有缓存的情况下，为该节点生成一个哈希表
                 query->generateCache(i);
+#ifdef CACHE_LOG
+                printf("generate cached hashmap: query %lu node %lu\n", queries_.size(), i);
+#endif
             } else if(query->isJoinNode(i)){
                 // 就算不需要缓存，Join节点也需要生成哈希表
                 query->generateTmpCache(i);
+#ifdef CACHE_LOG
+                printf("generate tmp hashmap: query %lu node %lu\n", queries_.size(), i);
+#endif
             }
         }
 
@@ -488,6 +513,8 @@ public:
 
     // 将已经执行完毕的query，加入到缓存当中
     void cacheQuery(QueryCache* query){
+        queries_.push_back(query);
+
 #ifdef NO_CACHE
         // 释放query中的所有hashmap
         for(size_t i=0; i<query->getNodeNum(); i++){
@@ -495,7 +522,7 @@ public:
         }
         return;
 #endif
-        queries_.push_back(query);
+
         size_t query_size = query->getCacheSize();
 
         if(query_size > MAX_CACHE_SIZE){
@@ -527,6 +554,9 @@ public:
                     printf("add cached hashmap: query %lu node %lu\n", queries_.size()-1, i);
 #endif
                 } else if(type==QueryCache::DONT_CACHE){
+#ifdef CACHE_LOG
+                    printf("free tmp hashmap: query %lu node %lu\n", queries_.size()-1, i);
+#endif
                     query->invalidCache(i);
                 }
             }
