@@ -3,6 +3,7 @@
 #include "stdlib.h"
 #include "assert.h"
 #include "hardware.h"
+#include "MemoryPool.hpp"
 
 //#define PREFETCH
 
@@ -59,6 +60,7 @@ public:
     inline void insertAll_tagged(EntryHeader* first, size_t n, size_t step);
     /// Set size (no resize functionality)
     inline size_t setSize(size_t nrEntries);
+    inline size_t setSizeUseMemPool(size_t nrEntries);
     /// Removes all elements from the hashtable
     inline void clear();
 
@@ -76,6 +78,7 @@ public:
 #endif
 
     std::atomic<EntryHeader*>* entries = nullptr;
+    bool entries_use_mem_pool = false;
 
     hash_t mask;      // mask 用于将任意哈希值映射到桶数组的索引范围内，即0~capacity-1
     using ptr_t = uint64_t;
@@ -120,7 +123,7 @@ inline Hashmap::EntryHeader* Hashmap::end() { return nullptr; }
 
 inline Hashmap::~Hashmap() {
     //if (entries) mem::free_huge(entries, capacity * sizeof(std::atomic<EntryHeader*>));
-    if (entries) free(entries);
+    if (entries && !entries_use_mem_pool) free(entries);
     for(auto [p,n]:allocations_){
         if(p) free(p);
     }
@@ -258,7 +261,8 @@ void inline Hashmap::insertAll_tagged(EntryHeader* first, size_t n,
 size_t inline Hashmap::setSize(size_t nrEntries) {
     assert(nrEntries != 0);
     //if (entries) mem::free_huge(entries, capacity * sizeof(std::atomic<EntryHeader*>));
-    if (entries) free(entries);
+    if (entries && !entries_use_mem_pool) free(entries);
+    entries_use_mem_pool = false;
 
    const auto loadFactor = 0.7;
     size_t exp = 64 - __builtin_clzll(nrEntries);
@@ -268,6 +272,25 @@ size_t inline Hashmap::setSize(size_t nrEntries) {
     mask = capacity - 1;
     //entries = static_cast<std::atomic<EntryHeader*>*>(mem::malloc_huge(capacity * sizeof(std::atomic<EntryHeader*>)));
     entries = static_cast<std::atomic<EntryHeader*>*>(malloc(capacity * sizeof(std::atomic<EntryHeader*>)));
+    memset((void *)entries,0,capacity * sizeof(std::atomic<EntryHeader*>));
+
+    total_mem_size_ = capacity * sizeof(std::atomic<EntryHeader*>);
+    return capacity * loadFactor;
+}
+
+size_t inline Hashmap::setSizeUseMemPool(size_t nrEntries) {
+    assert(nrEntries != 0);
+    //if (entries) mem::free_huge(entries, capacity * sizeof(std::atomic<EntryHeader*>));
+    if (entries && !entries_use_mem_pool) free(entries);
+    entries_use_mem_pool = true;
+
+    const auto loadFactor = 0.7;
+    size_t exp = 64 - __builtin_clzll(nrEntries);
+    assert(exp < sizeof(hash_t) * 8);
+    if (((size_t)1 << exp) < nrEntries / loadFactor) exp++;
+   capacity = ((size_t)1) << exp;
+    mask = capacity - 1;
+    entries = static_cast<std::atomic<EntryHeader*>*>(local_allocator.allocate(capacity * sizeof(std::atomic<EntryHeader*>)));
     memset((void *)entries,0,capacity * sizeof(std::atomic<EntryHeader*>));
 
     total_mem_size_ = capacity * sizeof(std::atomic<EntryHeader*>);

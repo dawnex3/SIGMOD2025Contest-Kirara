@@ -506,7 +506,13 @@ public:
 #ifdef DEBUG_LOG
                 printf("join %zu: build_rows=%lu\n",shared_.get_operator_id()-1,total_found);
 #endif
-                if (total_found) shared_.hashmap_->setSize(total_found);
+                if (total_found){
+                    if(store_hashmap_){
+                        shared_.hashmap_->setSize(total_found);
+                    } else {
+                        shared_.hashmap_->setSizeUseMemPool(total_found);
+                    }
+                }
             });
             profile_guard.resume();
             auto total_found = shared_.found_.load();
@@ -548,7 +554,7 @@ public:
                     allocations_.~vector();
 #ifdef DEBUG_LOG
                     printf("join %zu: output_rows=%ld, probe_rows=%ld\n",shared_.get_operator_id()-1,output_rows_,probe_rows_);
-                    std::cout<<table_str<<std::endl;
+//                    std::cout<<table_str<<std::endl;
 //                    std::ofstream log("log_false.txt", std::ios::app);
 //                    log << "join "<< shared_.get_operator_id()-1 <<" output rows: " << output_rows_ << ", details:\n";
 //                    log << table_str <<std::endl;
@@ -602,7 +608,7 @@ public:
             profile_guard.add_output_row_count(n);
 #ifdef DEBUG_LOG
             output_rows_ += n;
-            table_str.append(last_result_.toString(true));
+//            table_str.append(last_result_.toString(true));
 #endif
             return last_result_;
         }
@@ -871,12 +877,21 @@ public:
             cont_.next_probe_++;
         }
 
+//#ifdef PREFETCH
+//        uint32_t * prefetch_hash = probe_hashs_ + cont_.next_probe_ + 32;
+//#endif
+
         for (size_t i = cont_.next_probe_, end = cont_.num_probe_; i < end; i++) {
             uint32_t hash = probe_hashs_[i];
             uint32_t key = key_source_[i];
-            auto tmp = 0;
+//#ifdef PREFETCH
+//            // 如果还有足够的后续元素，预取较远一条记录对应桶的数据
+//            if (i + 32 < end) {
+//                shared_.hashmap_->prefetchBucket<0, 2>(*(prefetch_hash));
+//                prefetch_hash ++;
+//            }
+//#endif
             for (auto entry = shared_.hashmap_->find_chain_tagged(hash); entry != nullptr; entry = entry->next) {
-                tmp++;
                 if (entry->key == key) {
                     build_matches_[found] = entry;              // 记录左表（哈希表）匹配的EntryHeader
                     probe_matches_[found] = i;  // 记录右表匹配的行号
@@ -887,18 +902,15 @@ public:
                             cont_.last_chain_ = entry->next;
                             cont_.probe_key_ = key;
                             cont_.next_probe_ = i;
-//                            printf("%d\n", tmp);
                             return vec_size_;
                         } else if (i + 1 < end){    //本次哈希链已处理完，但是后面还有待probe的hash
                             cont_.last_chain_ = nullptr;
                             cont_.next_probe_ = i+1;
-//                            printf("%d\n", tmp);
                             return vec_size_;
                         }
                     }
                 }
             }
-//            printf("%d\n", tmp);
         }
         cont_.last_chain_ = nullptr;
         cont_.next_probe_ = cont_.num_probe_;
