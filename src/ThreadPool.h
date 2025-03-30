@@ -21,21 +21,17 @@ public:
         for (size_t i = 0; i < ThreadCount; ++i) {
             workers[i] = std::thread([this, i] {
                 local_allocator.init(&global_mempool);
+                std::unique_lock<std::mutex> lock(mutexes[i]);
+                
                 while (!stop_flag) {
-                    std::function<void()> task;
-                    {
-                        std::unique_lock<std::mutex> lock(mutexes[i]);
                         conditions[i].wait(lock, [this, i] { return stop_flag || tasks[i]; });
 
                         if (stop_flag && !tasks[i]) {
                             break;
                         }
 
-                        task = std::move(tasks[i]);
+                        tasks[i]();
                         tasks[i] = nullptr;
-                    }
-
-                    task();
                 }
             });
         }
