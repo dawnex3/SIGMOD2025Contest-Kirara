@@ -17,11 +17,9 @@ template <size_t ThreadCount>
 class StaticThreadPool {
 public:
     StaticThreadPool() : stop_flag(false) {
-        printf("Creating threadPool with %zu threads\n", ThreadCount);
         auto start = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < ThreadCount; ++i) {
             workers[i] = std::thread([this, i] {
-                printf("Thread %zu started\n", i);
                 local_allocator.init(&global_mempool);
                 while (!stop_flag) {
                     std::function<void()> task;
@@ -37,27 +35,22 @@ public:
                         tasks[i] = nullptr;
                     }
 
-                    printf("got a task in thread %zu\n", i);
                     task();
                 }
-                printf("Thread %zu stop\n", i);
             });
         }
     }
 
     ~StaticThreadPool() {
-        printf("Destroying threadPool\n");
         stop_flag = true;
         for (auto& condition : conditions) {
             condition.notify_all();
         }
-        printf("Waiting for threads to finish\n");
         for (std::thread &worker : workers) {
             if (worker.joinable()) {
                 worker.join();
             }
         }
-        printf("ThreadPool destroyed successfully\n");
     }
 
     template <typename Func>
@@ -72,8 +65,8 @@ public:
                     throw std::runtime_error("Thread already has a task assigned");
                 } 
                 tasks[thread_index] = std::forward<Func>(func);
+                conditions[thread_index].notify_all();
             }
-            conditions[thread_index].notify_all();
         }
     }
 
