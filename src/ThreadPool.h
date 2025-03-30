@@ -18,6 +18,7 @@ class StaticThreadPool {
 public:
     StaticThreadPool() : stop_flag(false) {
         printf("Creating threadPool with %zu threads\n", ThreadCount);
+        auto start = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < ThreadCount; ++i) {
             workers[i] = std::thread([this, i] {
                 printf("Thread %zu started\n", i);
@@ -26,7 +27,11 @@ public:
                     std::function<void()> task;
                     {
                         std::unique_lock<std::mutex> lock(mutexes[i]);
+                        auto wait_start = std::chrono::high_resolution_clock::now();
                         conditions[i].wait(lock, [this, i] { return stop_flag || tasks[i]; });
+                        auto wait_end = std::chrono::high_resolution_clock::now();
+                        auto wait_duration = std::chrono::duration_cast<std::chrono::microseconds>(wait_end - wait_start).count();
+                        printf("Thread %zu waited for %ld microseconds\n", i, wait_duration);
 
                         if (stop_flag && !tasks[i]) {
                             break;
@@ -36,13 +41,19 @@ public:
                         tasks[i] = nullptr;
                     }
 
+                    auto start = std::chrono::high_resolution_clock::now();
                     printf("got a task in thread %zu\n", i);
                     task();
+                    auto end = std::chrono::high_resolution_clock::now();
+                    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+                    printf("Thread %zu finished task in %ld microseconds\n", i, duration);
                 }
                 printf("Thread %zu stop\n", i);
             });
         }
-        printf("ThreadPool created successfully\n");
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        printf("ThreadPool created in %ld microseconds\n", duration);
     }
 
     ~StaticThreadPool() {
