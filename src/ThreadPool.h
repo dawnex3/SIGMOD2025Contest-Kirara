@@ -27,11 +27,7 @@ public:
                     std::function<void()> task;
                     {
                         std::unique_lock<std::mutex> lock(mutexes[i]);
-                        auto wait_start = std::chrono::high_resolution_clock::now();
                         conditions[i].wait(lock, [this, i] { return stop_flag || tasks[i]; });
-                        auto wait_end = std::chrono::high_resolution_clock::now();
-                        auto wait_duration = std::chrono::duration_cast<std::chrono::microseconds>(wait_end - wait_start).count();
-                        printf("Thread %zu waited for %ld microseconds\n", i, wait_duration);
 
                         if (stop_flag && !tasks[i]) {
                             break;
@@ -41,19 +37,12 @@ public:
                         tasks[i] = nullptr;
                     }
 
-                    auto start = std::chrono::high_resolution_clock::now();
                     printf("got a task in thread %zu\n", i);
                     task();
-                    auto end = std::chrono::high_resolution_clock::now();
-                    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-                    printf("Thread %zu finished task in %ld microseconds\n", i, duration);
                 }
                 printf("Thread %zu stop\n", i);
             });
         }
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-        printf("ThreadPool created in %ld microseconds\n", duration);
     }
 
     ~StaticThreadPool() {
@@ -64,7 +53,9 @@ public:
         }
         printf("Waiting for threads to finish\n");
         for (std::thread &worker : workers) {
-            worker.detach();
+            if (worker.joinable()) {
+                worker.join();
+            }
         }
         printf("ThreadPool destroyed successfully\n");
     }
@@ -76,9 +67,13 @@ public:
         } else {
             {
                 std::unique_lock<std::mutex> lock(mutexes[thread_index]);
+                if (tasks[thread_index] != nullptr) {
+                    printf("Thread %zu already has a task assigned\n", thread_index);
+                    throw std::runtime_error("Thread already has a task assigned");
+                } 
                 tasks[thread_index] = std::forward<Func>(func);
             }
-            conditions[thread_index].notify_one();
+            conditions[thread_index].notify_all();
         }
     }
 
