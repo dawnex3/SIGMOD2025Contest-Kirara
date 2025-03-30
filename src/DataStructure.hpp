@@ -516,7 +516,13 @@ void gatherContinuousCol(OperatorResultTable::ContinuousColumn input_column, siz
             const Page* current_page = col->pages[i];                       // 要读取的页面
             size_t start_row = i==std::get<1>(input_column) ? std::get<2>(input_column) : 0;  // 本页的起始行
             size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
-            if (true || __glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
+            if(__glibc_likely(getNonNullCount(current_page) == getRowCount(current_page))){
+                const int32_t* base = getPageData<int32_t>(current_page) + start_row;
+                for (size_t j=start_row; j<end_row; j++) {
+                    *(int32_t*)(col_target) = *(base++);
+                    col_target += col_step;
+                }
+            } else {
                 const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
                 const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
 
@@ -526,13 +532,6 @@ void gatherContinuousCol(OperatorResultTable::ContinuousColumn input_column, siz
                     } else {
                         *(int32_t*)(col_target) = NULL_INT32;
                     }
-                    col_target += col_step;
-                }
-
-            } else {
-                const int32_t* base = getPageData<int32_t>(current_page) + start_row;
-                for (size_t j=start_row; j<end_row; j++) {
-                    *(int32_t*)(col_target) = *(base++);
                     col_target += col_step;
                 }
             }
@@ -559,7 +558,20 @@ void gatherContinuousCol(OperatorResultTable::ContinuousColumn input_column, siz
                 const uint8_t* bitmap = getBitmap(current_page);                // 要读取页面的位图
                 size_t start_row = i==std::get<1>(input_column) ? std::get<2>(input_column) : 0;  // 本页的起始行
                 size_t end_row = std::min((size_t)getRowCount(current_page), n + start_row);  // 本页的终止行
-                if (true || __glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
+
+                if(__glibc_likely(getNonNullCount(current_page) == getRowCount(current_page))){
+                    const char* base = getPageData<char>(current_page);             // 本页数据的起始指针
+                    const uint16_t* current_offset = getVarcharOffset(current_page) + start_row;  // 当前字符串的结尾的偏移量
+                    uint16_t last_offset = start_row == 0 ? 0 : *(current_offset-1);                // 当前字符串的开头的偏移量
+
+                    for (size_t j=start_row; j<end_row; j++) {
+                        varchar_ptr ptr(base + last_offset,*current_offset - last_offset);
+                        *(uint64_t *)(col_target) = ptr.ptr_;
+                        last_offset = *current_offset;
+                        current_offset ++;
+                        col_target += col_step;
+                    }
+                } else {
                     const char* base = getPageData<char>(current_page);             // 本页数据的起始指针
                     const uint16_t* current_offset = getVarcharOffset(current_page) + getNonNullCount(bitmap, start_row);  // 当前字符串的结尾的偏移量
                     uint16_t last_offset = getNonNullCount(bitmap, start_row)==0 ? 0 : *(current_offset-1);                // 当前字符串的开头的偏移量
@@ -575,19 +587,8 @@ void gatherContinuousCol(OperatorResultTable::ContinuousColumn input_column, siz
                         }
                         col_target += col_step;
                     }
-                } else {
-                    const char* base = getPageData<char>(current_page);             // 本页数据的起始指针
-                    const uint16_t* current_offset = getVarcharOffset(current_page) + start_row;  // 当前字符串的结尾的偏移量
-                    uint16_t last_offset = start_row == 0 ? 0 : *(current_offset-1);                // 当前字符串的开头的偏移量
-
-                    for (size_t j=start_row; j<end_row; j++) {
-                        varchar_ptr ptr(base + last_offset,*current_offset - last_offset);
-                        *(uint64_t *)(col_target) = ptr.ptr_;
-                        last_offset = *current_offset;
-                        current_offset ++;
-                        col_target += col_step;
-                    }
                 }
+
                 n -= end_row-start_row;
             }
             if(n<=0) break;
@@ -615,64 +616,57 @@ void gatherContinuousColWithIndex(OperatorResultTable::ContinuousColumn input_co
         size_t nonnull_count = 0;
         const uint8_t* bitmap = nullptr;
         uint32_t cur_page_row_num = getRowCount(*current_page);
+        bool is_nonnull_page = false;
         for(uint32_t i=0; i<n; i++){
             // 定位到idx[i]所在的Page，和页内偏移
             while(offset >= cur_page_row_num){
                 offset -= cur_page_row_num;
                 cur_page_row_num = getRowCount(*++current_page);
             }
-            if (true || __glibc_unlikely(getNonNullCount(*current_page) != getRowCount(*current_page))){
-                if (prev_current_page != current_page){
-                    bitmap = getBitmap(*current_page);
-                    nonnull_count = getNonNullCount(bitmap, offset);
-                    prev_offset = offset;
-                }
 
-                // 取出数据
-                if(isNotNull(bitmap, offset)){
-                    if (prev_current_page == current_page){
-    //                    auto correct_nonnull_count = getNonNullCount(bitmap, offset);
-                        nonnull_count += getNonNullCount(bitmap, prev_offset, offset);
-    //                    printf("bits = %u %u\n", offset, prev_offset);
-                    }
-                    const int32_t* data_ptr = getPageData<int32_t>(*current_page) + nonnull_count;
-                    *(int32_t*)(col_target) = *data_ptr;
-                    prev_offset = offset;
-                } else {
-                    *(int32_t*)(col_target) = NULL_INT32;
-                }
+            if (prev_current_page != current_page){
+                bitmap = getBitmap(*current_page);
+                nonnull_count = getNonNullCount(bitmap, offset);
+                is_nonnull_page = getNonNullCount(*current_page) == getRowCount(*current_page);
+                prev_offset = offset;
                 prev_current_page = current_page;
-            } else {
+            }
+
+            // 取出数据
+            if(__glibc_likely(is_nonnull_page)){
                 const int32_t* data_ptr = getPageData<int32_t>(*current_page) + offset;
                 *(int32_t*)(col_target) = *data_ptr;
+            }else if(isNotNull(bitmap, offset)){
+                nonnull_count += getNonNullCount(bitmap, prev_offset, offset);
+                const int32_t* data_ptr = getPageData<int32_t>(*current_page) + nonnull_count;
+                *(int32_t*)(col_target) = *data_ptr;
+                prev_offset = offset;
+            } else {
+                *(int32_t*)(col_target) = NULL_INT32;
             }
 
             col_target += col_step;
             offset += idx[i+1] - idx[i]; // 假设下标数组idx是递增的
         }
-//        if (__glibc_unlikely(getNonNullCount(*current_page) != getRowCount(*current_page))){
-//
-//        } else {
-//            uint32_t cur_page_row_num = getRowCount(*current_page);
-//            for(uint32_t i=0; i<n; i++){
-//                // 定位到idx[i]所在的Page，和页内偏
-//                while(offset >= cur_page_row_num){
-//                    offset -= cur_page_row_num;
-//                    cur_page_row_num = getRowCount(*++current_page);
-//                }
-//                // 取出数据
-//                const int32_t* data_ptr = getPageData<int32_t>(*current_page) + offset;
-//                *(int32_t*)(col_target) = *data_ptr;
-//                col_target += col_step;
-//                offset += idx[i+1] - idx[i]; // 假设下标数组idx是递增的
-//            }
-//        }
     } else if(col->type==DataType::VARCHAR){
+        Page *const * prev_current_page = nullptr;
+        uint32_t prev_offset = offset;
+        size_t nonnull_count = 0;
+        const uint8_t* bitmap = nullptr;
+        bool is_nonnull_page = false;
         for(uint32_t i=0; i<n; i++){
             // 定位到idx[i]所在的Page，和页内偏移
             while(offset >= getStringCount(*current_page)){
                 offset -= getStringCount(*current_page);
                 current_page++;
+            }
+
+            if (prev_current_page != current_page){
+                bitmap = getBitmap(*current_page);
+                nonnull_count = getNonNullCount(bitmap, offset);
+                is_nonnull_page = getNonNullCount(*current_page) == getRowCount(*current_page);
+                prev_offset = offset;
+                prev_current_page = current_page;
             }
 
             if(isLongStringStart(*current_page)){
@@ -685,22 +679,60 @@ void gatherContinuousColWithIndex(OperatorResultTable::ContinuousColumn input_co
                 current_page = end_page;
                 offset = 0; // offset强制设为0，因为下一个条目必然从新页开始
             } else {
-                const uint8_t* bitmap = getBitmap(*current_page);
-                if(isNotNull(bitmap, offset)){
-                    // 获取varchar的起始和终止位置
-                    size_t non_null = getNonNullCount(bitmap,offset);
-                    const uint16_t* str_end = getVarcharOffset(*current_page) + non_null;
-                    uint16_t str_begin = non_null==0 ? 0 : *(str_end-1);
+                if(false && __glibc_likely(is_nonnull_page)){
+                    const uint16_t* str_end = getVarcharOffset(*current_page) + offset;
+                    uint16_t str_begin = offset==0 ? 0 : *(str_end-1);
                     varchar_ptr ptr(getPageData<char>(*current_page) + str_begin,*str_end - str_begin);
                     *(uint64_t *)(col_target) = ptr.ptr_;
+                }else if(isNotNull(bitmap, offset)){
+                    // 获取varchar的起始和终止位置
+                    nonnull_count += getNonNullCount(bitmap, prev_offset, offset);
+                    const uint16_t* str_end = getVarcharOffset(*current_page) + nonnull_count;
+                    uint16_t str_begin = nonnull_count==0 ? 0 : *(str_end-1);
+                    varchar_ptr ptr(getPageData<char>(*current_page) + str_begin,*str_end - str_begin);
+                    *(uint64_t *)(col_target) = ptr.ptr_;
+                    prev_offset = offset;
                 } else {
-                    *(uint64_t*)(col_target) = NULL_VARCHAR;
+                    *(uint64_t *)(col_target) = NULL_VARCHAR;
                 }
                 offset += idx[i+1] - idx[i]; // 假设下标数组idx是递增的
             }
             col_target += col_step;
 
         }
+//        for(uint32_t i=0; i<n; i++){
+//            // 定位到idx[i]所在的Page，和页内偏移
+//            while(offset >= getStringCount(*current_page)){
+//                offset -= getStringCount(*current_page);
+//                current_page++;
+//            }
+//
+//            if(isLongStringStart(*current_page)){
+//                Page *const * end_page = current_page+1;
+//                while(end_page!=col->pages.data()+col->pages.size() && isLongStringFollow(*end_page)){
+//                    end_page++;
+//                }
+//                varchar_ptr ptr(current_page,end_page-current_page);
+//                *(uint64_t *)(col_target) = ptr.ptr_;
+//                current_page = end_page;
+//                offset = 0; // offset强制设为0，因为下一个条目必然从新页开始
+//            } else {
+//                const uint8_t* bitmap = getBitmap(*current_page);
+//                if(isNotNull(bitmap, offset)){
+//                    // 获取varchar的起始和终止位置
+//                    size_t non_null = getNonNullCount(bitmap,offset);
+//                    const uint16_t* str_end = getVarcharOffset(*current_page) + non_null;
+//                    uint16_t str_begin = non_null==0 ? 0 : *(str_end-1);
+//                    varchar_ptr ptr(getPageData<char>(*current_page) + str_begin,*str_end - str_begin);
+//                    *(uint64_t *)(col_target) = ptr.ptr_;
+//                } else {
+//                    *(uint64_t*)(col_target) = NULL_VARCHAR;
+//                }
+//                offset += idx[i+1] - idx[i]; // 假设下标数组idx是递增的
+//            }
+//            col_target += col_step;
+//
+//        }
     } else {
         throw std::runtime_error("Unsupported data type");
     }
