@@ -54,7 +54,7 @@ public:
         printf("Waiting for threads to finish\n");
         for (std::thread &worker : workers) {
             if (worker.joinable()) {
-                worker.join();
+                worker.detach();
             }
         }
         printf("ThreadPool destroyed successfully\n");
