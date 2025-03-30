@@ -676,8 +676,13 @@ void gatherContinuousColWithIndex(OperatorResultTable::ContinuousColumn input_co
                 }
                 varchar_ptr ptr(current_page,end_page-current_page);
                 *(uint64_t *)(col_target) = ptr.ptr_;
-                current_page = end_page;
-                offset = 0; // offset强制设为0，因为下一个条目必然从新页开始
+
+                if(idx[i+1] > idx[i]){
+                    current_page = end_page;
+                    offset = idx[i+1] - idx[i] - 1; // 此时offset要减一
+                } else {
+                    offset = 0;                     // idx[i+1] == idx[i],下个数据还是该LONG STR
+                }
             } else {
                 if(false && __glibc_likely(is_nonnull_page)){
                     const uint16_t* str_end = getVarcharOffset(*current_page) + offset;
