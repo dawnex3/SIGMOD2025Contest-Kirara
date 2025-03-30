@@ -81,12 +81,10 @@ template <size_t ThreadCount>
 class StaticThreadPool {
 public:
     StaticThreadPool() : stop_flag(false) {
-        printf("thread pool create\n");
-
         for (size_t i = 0; i < ThreadCount; ++i) {
             workers[i] = std::thread([this, i] {
               local_allocator.init(&global_mempool);
-                while (true) {
+                while (!stop_flag) {
                     std::function<void()> task;
                     {
                         std::unique_lock<std::mutex> lock(mutexes[i]);
@@ -112,7 +110,6 @@ public:
     }
 
     ~StaticThreadPool() {
-        printf("thread pool destroy\n");
         stop_flag = true;
         for (auto& condition : conditions) {
             condition.notify_all();
