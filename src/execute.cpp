@@ -698,25 +698,25 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
    return result;
 }
 
+void *build_context() {
 
-void* build_context() {
+  global_profiler = new Profiler(1);
+  global_profiler->set_thread_id(0);
 
-   global_profiler = new Profiler(1);
-   global_profiler->set_thread_id(0);
+  global_mempool.init();
+  if (g_thread_pool == nullptr) {
+    g_thread_pool = new ThreadPool();
+  }
 
-   global_mempool.init();
-   g_thread_pool = new ThreadPool();
-
-   global_profiler->print_profiles();
-   delete global_profiler;
-   global_profiler = nullptr;
-   return nullptr;
+  global_profiler->print_profiles();
+  delete global_profiler;
+  global_profiler = nullptr;
+  return nullptr;
 }
 
-void destroy_context([[maybe_unused]] void* context) {
+void destroy_context([[maybe_unused]] void *context) {
 
-   global_mempool.destroy();
-   delete g_thread_pool;
+  global_mempool.destroy();
 }
 
 } // namespace Contest
