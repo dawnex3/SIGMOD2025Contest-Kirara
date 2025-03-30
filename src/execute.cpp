@@ -507,114 +507,114 @@ size_t threadNum(const Plan& plan){
 CacheManager cache_manager;     // 哈希表缓存管理器。放在这儿合适吗？是不是得移到build_context中。
 
 
-ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+// ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 
-#ifdef DEBUG_LOG
-    printPlanTree(plan);    // 以人类可读的方式打印计划树
-#endif
+// #ifdef DEBUG_LOG
+//     printPlanTree(plan);    // 以人类可读的方式打印计划树
+// #endif
 
-    size_t thread_num = threadNum(plan);                // 线程数
-    const int vector_size = 1024;                       // 向量化的批次大小
-    std::vector<std::thread> threads;                   // 线程池
-    std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
-    SharedStateManager shared_manager;                  // 创建共享状态
-    ColumnarTable result;                               // 执行结果
-    QueryCache* query_cache = cache_manager.getQuery(plan);           // 哈希表缓存
-    global_profiler = new Profiler(thread_num);
-    global_mempool.reset();
+//     size_t thread_num = threadNum(plan);                // 线程数
+//     const int vector_size = 1024;                       // 向量化的批次大小
+//     std::vector<std::thread> threads;                   // 线程池
+//     std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
+//     SharedStateManager shared_manager;                  // 创建共享状态
+//     ColumnarTable result;                               // 执行结果
+//     QueryCache* query_cache = cache_manager.getQuery(plan);           // 哈希表缓存
+//     global_profiler = new Profiler(thread_num);
+//     global_mempool.reset();
 
-    static int exec_cnt = 0;
-    if (++exec_cnt == 113) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
-    }
+//     static int exec_cnt = 0;
+//     if (++exec_cnt == 113) {
+//         std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
+//     }
 
-    // 启动所有线程
-    for (size_t i = 0; i < thread_num; ++i) {
-        size_t barrier_group = i / Barrier::threads_per_barrier_;    // 每threads_per_barrier_个线程属于一个barrier_group
+//     // 启动所有线程
+//     for (size_t i = 0; i < thread_num; ++i) {
+//         size_t barrier_group = i / Barrier::threads_per_barrier_;    // 每threads_per_barrier_个线程属于一个barrier_group
 
-        if (i == thread_num - 1) {
-            [&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
-                local_allocator.init(&global_mempool);
-                local_allocator.reuse();
-                global_profiler->set_thread_id(i);
-                ProfileGuard profile_guard(global_profiler, "execute");
-                // 确定当前线程的Barrier
-                current_barrier = barriers[barrier_group];
-                // 每个线程生成各自的执行计划
-                ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size, query_cache);
-                // 执行计划
-                result_writer->next();
-                // 等待所有线程完成
-                current_barrier->wait([&]() {
-                    result = std::move(result_writer->shared_.output_); // 由最后一个线程转移结果
-#ifdef DEBUG_LOG
-                    auto now = std::chrono::high_resolution_clock::now();
-                    auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
-                    printf("result writer finish at %lu us\n", microseconds);
-#endif
-                });
-            }();
-        } else {
-            threads.emplace_back([&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
-                local_allocator.init(&global_mempool);
-                local_allocator.reuse();
-                global_profiler->set_thread_id(i);
-                ProfileGuard profile_guard(global_profiler, "execute");
-                // 确定当前线程的Barrier
-                current_barrier = barriers[barrier_group];
-                // 每个线程生成各自的执行计划
-                ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size, query_cache);
-                // 执行计划
-                result_writer->next();
-                // 等待所有线程完成
-                current_barrier->wait([&]() {
-                    result = std::move(result_writer->shared_.output_); // 由最后一个线程转移结果
-#ifdef DEBUG_LOG
-                    auto now = std::chrono::high_resolution_clock::now();
-                    auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
-                    printf("result writer finish at %lu us\n", microseconds);
-#endif
-                });
-            });
-        }
-    }
+//         if (i == thread_num - 1) {
+//             [&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
+//                 local_allocator.init(&global_mempool);
+//                 local_allocator.reuse();
+//                 global_profiler->set_thread_id(i);
+//                 ProfileGuard profile_guard(global_profiler, "execute");
+//                 // 确定当前线程的Barrier
+//                 current_barrier = barriers[barrier_group];
+//                 // 每个线程生成各自的执行计划
+//                 ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size, query_cache);
+//                 // 执行计划
+//                 result_writer->next();
+//                 // 等待所有线程完成
+//                 current_barrier->wait([&]() {
+//                     result = std::move(result_writer->shared_.output_); // 由最后一个线程转移结果
+// #ifdef DEBUG_LOG
+//                     auto now = std::chrono::high_resolution_clock::now();
+//                     auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+//                     printf("result writer finish at %lu us\n", microseconds);
+// #endif
+//                 });
+//             }();
+//         } else {
+//             threads.emplace_back([&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
+//                 local_allocator.init(&global_mempool);
+//                 local_allocator.reuse();
+//                 global_profiler->set_thread_id(i);
+//                 ProfileGuard profile_guard(global_profiler, "execute");
+//                 // 确定当前线程的Barrier
+//                 current_barrier = barriers[barrier_group];
+//                 // 每个线程生成各自的执行计划
+//                 ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size, query_cache);
+//                 // 执行计划
+//                 result_writer->next();
+//                 // 等待所有线程完成
+//                 current_barrier->wait([&]() {
+//                     result = std::move(result_writer->shared_.output_); // 由最后一个线程转移结果
+// #ifdef DEBUG_LOG
+//                     auto now = std::chrono::high_resolution_clock::now();
+//                     auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+//                     printf("result writer finish at %lu us\n", microseconds);
+// #endif
+//                 });
+//             });
+//         }
+//     }
 
-    // 等待所有线程结束
-    for (auto& t : threads) {
-        if (t.joinable()) {
-            t.join();
-        }
-    }
+//     // 等待所有线程结束
+//     for (auto& t : threads) {
+//         if (t.joinable()) {
+//             t.join();
+//         }
+//     }
 
-    // 销毁屏障
-    Barrier::destroy(barriers);
+//     // 销毁屏障
+//     Barrier::destroy(barriers);
 
-    // 将query加入缓存
-    cache_manager.cacheQuery(query_cache);
+//     // 将query加入缓存
+//     cache_manager.cacheQuery(query_cache);
 
-    global_profiler->print_profiles();
-    delete global_profiler;
-    global_profiler = nullptr;
-    return result;
-}
+//     global_profiler->print_profiles();
+//     delete global_profiler;
+//     global_profiler = nullptr;
+//     return result;
+// }
 
 
-void* build_context() {
-    global_profiler = new Profiler(1);
-    global_profiler->set_thread_id(0);
+// void* build_context() {
+//     global_profiler = new Profiler(1);
+//     global_profiler->set_thread_id(0);
 
-    global_mempool.init();
+//     global_mempool.init();
 
-    global_profiler->print_profiles();
-    delete global_profiler;
-    global_profiler = nullptr;
-    return nullptr;
-}
+//     global_profiler->print_profiles();
+//     delete global_profiler;
+//     global_profiler = nullptr;
+//     return nullptr;
+// }
 
-void destroy_context([[maybe_unused]] void* context) {
-    global_mempool.destroy();
-}
-} // namespace Contest
+// void destroy_context([[maybe_unused]] void* context) {
+//     global_mempool.destroy();
+// }
+// } // namespace Contest
 
 
 //ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
@@ -627,92 +627,94 @@ void destroy_context([[maybe_unused]] void* context) {
 //    //    return table.to_columnar();
 //}
 
-//ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-//
-//#ifdef DEBUG_LOG
-//    printPlanTree(plan);    // 以人类可读的方式打印计划树
-//#endif
-//
-//    size_t thread_num = threadNum(plan);                // 线程数
-//    const int vector_size = 1024;                       // 向量化的批次大小
-//    std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
-//    SharedStateManager shared_manager;                  // 创建共享状态
-//    ColumnarTable result;                               // 执行结果
-//    QueryCache* query_cache = cache_manager.getQuery(plan);           // 哈希表缓存
-//    global_profiler = new Profiler(thread_num);
-//    global_mempool.reset();
-//    static int exec_cnt = 0;
-//    std::condition_variable finish_cv;
-//    std::mutex finish_mtx;
-//
-//    if (++exec_cnt == 113) {
-//        std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
-//    }
-//
-//    // 启动所有线程
-//    for (size_t i = 0; i < thread_num; ++i) {
-//        size_t barrier_group = i / Barrier::threads_per_barrier_;    // 每threads_per_barrier_个线程属于一个barrier_group
-//
-//        g_thread_pool->assign_task(i, [&plan, &shared_manager, &result,
-//                                       &barriers, barrier_group, i,
-//                                       &query_cache, &finish_cv, &finish_mtx]() {
-//          local_allocator.reuse();
-//          global_profiler->set_thread_id(i);
-//          ProfileGuard profile_guard(global_profiler, "execute");
-//          // 确定当前线程的Barrier
-//          current_barrier = barriers[barrier_group];
-//          // 每个线程生成各自的执行计划
-//          ResultWriter *result_writer =
-//              getPlan(plan, shared_manager, vector_size, query_cache);
-//          // 执行计划
-//          result_writer->next();
-//          // 等待所有线程完成
-//          bool is_last = current_barrier->wait();
-//          // 由最后一个线程转移结果
-//          if (is_last) {
-//            result = std::move(result_writer->shared_.output_);
-//            {
-//                std::unique_lock lock(finish_mtx);
-//                finish_cv.notify_all();
-//            }
-//          }
-//        });
-//    }
-//
-//    // 等待所有线程结束
-//    {
-//        std::unique_lock lock(finish_mtx);
-//        finish_cv.wait(lock);
-//    }
-//
-//    // 销毁屏障
-//    Barrier::destroy(barriers);
-//
-//    // 将query加入缓存
-//    cache_manager.cacheQuery(query_cache);
-//
-//    global_profiler->print_profiles();
-//    delete global_profiler;
-//    global_profiler = nullptr;
-//
-//    return result;
-//}
-//
-//
-//void* build_context() {
-//    global_profiler = new Profiler(1);
-//    global_profiler->set_thread_id(0);
-//
-//    global_mempool.init();
-//    g_thread_pool = new ThreadPool();
-//
-//    global_profiler->print_profiles();
-//    delete global_profiler;
-//    global_profiler = nullptr;
-//    return nullptr;
-//}
-//
-//void destroy_context([[maybe_unused]] void* context) {
-//    global_mempool.destroy();
-//    delete g_thread_pool;
-//}
+ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+
+#ifdef DEBUG_LOG
+   printPlanTree(plan);    // 以人类可读的方式打印计划树
+#endif
+
+   size_t thread_num = threadNum(plan);                // 线程数
+   const int vector_size = 1024;                       // 向量化的批次大小
+   std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
+   SharedStateManager shared_manager;                  // 创建共享状态
+   ColumnarTable result;                               // 执行结果
+   QueryCache* query_cache = cache_manager.getQuery(plan);           // 哈希表缓存
+   global_profiler = new Profiler(thread_num);
+   global_mempool.reset();
+   static int exec_cnt = 0;
+   std::condition_variable finish_cv;
+   std::mutex finish_mtx;
+
+   if (++exec_cnt == 113) {
+       std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
+   }
+
+   // 启动所有线程
+   for (size_t i = 0; i < thread_num; ++i) {
+       size_t barrier_group = i / Barrier::threads_per_barrier_;    // 每threads_per_barrier_个线程属于一个barrier_group
+
+       g_thread_pool->assign_task(i, [&plan, &shared_manager, &result,
+                                      &barriers, barrier_group, i,
+                                      &query_cache, &finish_cv, &finish_mtx]() {
+         local_allocator.reuse();
+         global_profiler->set_thread_id(i);
+         ProfileGuard profile_guard(global_profiler, "execute");
+         // 确定当前线程的Barrier
+         current_barrier = barriers[barrier_group];
+         // 每个线程生成各自的执行计划
+         ResultWriter *result_writer =
+             getPlan(plan, shared_manager, vector_size, query_cache);
+         // 执行计划
+         result_writer->next();
+         // 等待所有线程完成
+         bool is_last = current_barrier->wait();
+         // 由最后一个线程转移结果
+         if (is_last) {
+           result = std::move(result_writer->shared_.output_);
+           {
+               std::unique_lock lock(finish_mtx);
+               finish_cv.notify_all();
+           }
+         }
+       });
+   }
+
+   // 等待所有线程结束
+   {
+       std::unique_lock lock(finish_mtx);
+       finish_cv.wait(lock);
+   }
+
+   // 销毁屏障
+   Barrier::destroy(barriers);
+
+   // 将query加入缓存
+   cache_manager.cacheQuery(query_cache);
+
+   global_profiler->print_profiles();
+   delete global_profiler;
+   global_profiler = nullptr;
+
+   return result;
+}
+
+
+void* build_context() {
+   global_profiler = new Profiler(1);
+   global_profiler->set_thread_id(0);
+
+   global_mempool.init();
+   g_thread_pool = new ThreadPool();
+
+   global_profiler->print_profiles();
+   delete global_profiler;
+   global_profiler = nullptr;
+   return nullptr;
+}
+
+void destroy_context([[maybe_unused]] void* context) {
+   global_mempool.destroy();
+   delete g_thread_pool;
+}
+
+} // namespace Contest

@@ -144,5 +144,5 @@ private:
 
 using ThreadPool = StaticThreadPool<std::min(SPC__THREAD_COUNT, 64)>;
 
-thread_local ThreadPool *g_thread_pool = nullptr;
+ThreadPool *g_thread_pool = nullptr;
 
