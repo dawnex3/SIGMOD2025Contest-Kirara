@@ -700,7 +700,6 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 
 
 void* build_context() {
-    printf("create context\n");
 
    global_profiler = new Profiler(1);
    global_profiler->set_thread_id(0);
@@ -715,7 +714,6 @@ void* build_context() {
 }
 
 void destroy_context([[maybe_unused]] void* context) {
-    printf("destroy context\n");
 
    global_mempool.destroy();
    delete g_thread_pool;
