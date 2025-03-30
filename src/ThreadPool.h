@@ -81,8 +81,11 @@ template <size_t ThreadCount>
 class StaticThreadPool {
 public:
     StaticThreadPool() : stop_flag(false) {
+        printf("thread pool create\n");
+
         for (size_t i = 0; i < ThreadCount; ++i) {
             workers[i] = std::thread([this, i] {
+                printf("thread %d start\n", i);
               local_allocator.init(&global_mempool);
                 while (true) {
                     std::function<void()> task;
@@ -100,6 +103,7 @@ public:
 
                     task();
                 }
+                printf("thread %d stop\n", i);
             });
             pthread_t thread = workers[i].native_handle();
             int ret = pthread_setname_np(pthread_self(),  "fast-worker");
@@ -110,6 +114,7 @@ public:
     }
 
     ~StaticThreadPool() {
+        printf("thread pool destroy\n");
         stop_flag = true;
         for (auto& condition : conditions) {
             condition.notify_all();
