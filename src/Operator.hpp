@@ -505,6 +505,9 @@ public:
                 auto total_found = shared_.found_.load();
 #ifdef DEBUG_LOG
                 printf("join %zu: build_rows=%lu\n",shared_.get_operator_id()-1,total_found);
+                auto now = std::chrono::high_resolution_clock::now();
+                auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+                printf("join %zu finish build at %lu us\n", shared_.get_operator_id()-1, microseconds);
 #endif
                 if (total_found){
                     if(store_hashmap_){

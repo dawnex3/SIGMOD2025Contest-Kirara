@@ -372,77 +372,6 @@ void printPlanTree(const Plan &plan) {
 }
 
 
-//Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& shared_manager, bool is_build_side, size_t vector_size = 1024, QueryCache* query_cache=nullptr){
-//    auto& node = plan.nodes[node_idx];
-//    return std::visit(
-//        [&](const auto& value)-> Operator *{
-//            using T = std::decay_t<decltype(value)>;
-//            if constexpr (std::is_same_v<T, JoinNode>) {        // 如果是join节点
-//                auto& shared = shared_manager.get<Hashjoin::Shared>(node_idx + 1); //共享状态id设为node_idx+1
-//                Operator *right_op = getOperator(plan, value.right, shared_manager, !value.build_left, vector_size, query_cache);
-//                Operator *left_op = getOperator(plan, value.left, shared_manager, value.build_left, vector_size, query_cache);
-//                if(__glibc_unlikely(value.build_left)){                      // 左侧构建，不经常情况
-//                    if(left_op == nullptr){                                  // 如果左侧构建是单表
-//                        ScanNode one_line_scan = std::get<ScanNode>(plan.nodes[value.left].data);
-//                        const ColumnarTable& table = plan.inputs[one_line_scan.base_table_id];
-//                        std::vector<const Column*> columns;
-//                        for(auto [col_idx, _]: plan.nodes[value.left].output_attrs){
-//                            columns.push_back(&table.columns[col_idx]);
-//                        }
-//                        Operator *naive_join = new (local_allocator.allocate(sizeof(Naivejoin))) Naivejoin(
-//                            vector_size, right_op, value.right_attr, columns, value.left_attr, node.output_attrs);
-//                        return naive_join;
-//                    }
-//                    Operator *hash_join = new (local_allocator.allocate(sizeof(Hashjoin))) Hashjoin(
-//                        shared, vector_size, left_op, value.left_attr,
-//                        right_op, value.right_attr, node.output_attrs, plan.nodes[value.left].output_attrs);
-//                    return hash_join;
-//                } else {                                        // 右侧构建，调换算子顺序，以及output_attrs的顺序
-//                    std::vector<std::tuple<size_t, DataType>> output_attrs;
-//                    size_t left_size = plan.nodes[value.left].output_attrs.size();
-//                    size_t right_size = plan.nodes[value.right].output_attrs.size();
-//                    for(auto [col_idx, col_type]: node.output_attrs){
-//                        output_attrs.emplace_back(col_idx>=left_size ? col_idx-left_size : col_idx+right_size, col_type);
-//                    }
-//
-//                    if(right_op == nullptr){                    // 如果右侧构建是单表
-//                        ScanNode one_line_scan = std::get<ScanNode>(plan.nodes[value.right].data);
-//                        const ColumnarTable& table = plan.inputs[one_line_scan.base_table_id];
-//                        std::vector<const Column*> columns;
-//                        for(auto [col_idx, _]: plan.nodes[value.right].output_attrs){
-//                            columns.push_back(&table.columns[col_idx]);
-//                        }
-//                        Operator *naive_join = new (local_allocator.allocate(sizeof(Naivejoin))) Naivejoin(
-//                            vector_size, left_op, value.left_attr, columns, value.right_attr, output_attrs);
-//                        return naive_join;
-//                    }
-//                    auto *hash_join = new (local_allocator.allocate(sizeof(Hashjoin))) Hashjoin(
-//                        shared, vector_size, right_op, value.right_attr,
-//                        left_op, value.left_attr, output_attrs, plan.nodes[value.right].output_attrs);
-//                    return hash_join;
-//                }
-//            } else if constexpr (std::is_same_v<T, ScanNode>){
-//                // 如果是scan节点
-//                const ColumnarTable& table = plan.inputs[value.base_table_id];
-//                if (table.num_rows == 1 && is_build_side){
-//                    return nullptr;
-//                }
-//                auto& shared = shared_manager.get<Scan::Shared>(node_idx + 1); //共享状态id设为node_idx+1
-//                size_t row_num = table.num_rows;
-//                // 填充数据源
-//                std::vector<const Column*> columns;
-//                for(auto [col_idx, _]: node.output_attrs){
-//                    columns.push_back(&table.columns[col_idx]);
-//                }
-//                Scan *scan = new (local_allocator.allocate(sizeof(Scan))) Scan(shared,row_num,vector_size,columns);
-//
-//                return scan;
-//            }
-//        },
-//        node.data);
-//}
-
-
 Operator *getOperator(const Plan& plan, size_t node_idx, SharedStateManager& shared_manager, bool is_build_side, QueryCache* query_cache, size_t vector_size = 1024, const std::vector<ColumnarTable>* input=nullptr){
     auto& node = plan.nodes[node_idx];
     return std::visit(
@@ -578,14 +507,127 @@ size_t threadNum(const Plan& plan){
 CacheManager cache_manager;     // 哈希表缓存管理器。放在这儿合适吗？是不是得移到build_context中。
 
 
+ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+
+#ifdef DEBUG_LOG
+    printPlanTree(plan);    // 以人类可读的方式打印计划树
+#endif
+
+    size_t thread_num = threadNum(plan);                // 线程数
+    const int vector_size = 1024;                       // 向量化的批次大小
+    std::vector<std::thread> threads;                   // 线程池
+    std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
+    SharedStateManager shared_manager;                  // 创建共享状态
+    ColumnarTable result;                               // 执行结果
+    QueryCache* query_cache = cache_manager.getQuery(plan);           // 哈希表缓存
+    global_profiler = new Profiler(thread_num);
+    global_mempool.reset();
+
+    static int exec_cnt = 0;
+    if (++exec_cnt == 113) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
+    }
+
+    // 启动所有线程
+    for (size_t i = 0; i < thread_num; ++i) {
+        size_t barrier_group = i / Barrier::threads_per_barrier_;    // 每threads_per_barrier_个线程属于一个barrier_group
+
+        if (i == thread_num - 1) {
+            [&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
+                local_allocator.init(&global_mempool);
+                local_allocator.reuse();
+                global_profiler->set_thread_id(i);
+                ProfileGuard profile_guard(global_profiler, "execute");
+                // 确定当前线程的Barrier
+                current_barrier = barriers[barrier_group];
+                // 每个线程生成各自的执行计划
+                ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size, query_cache);
+                // 执行计划
+                result_writer->next();
+                // 等待所有线程完成
+                current_barrier->wait([&]() {
+                    result = std::move(result_writer->shared_.output_); // 由最后一个线程转移结果
+#ifdef DEBUG_LOG
+                    auto now = std::chrono::high_resolution_clock::now();
+                    auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+                    printf("result writer finish at %lu us\n", microseconds);
+#endif
+                });
+            }();
+        } else {
+            threads.emplace_back([&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
+                local_allocator.init(&global_mempool);
+                local_allocator.reuse();
+                global_profiler->set_thread_id(i);
+                ProfileGuard profile_guard(global_profiler, "execute");
+                // 确定当前线程的Barrier
+                current_barrier = barriers[barrier_group];
+                // 每个线程生成各自的执行计划
+                ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size, query_cache);
+                // 执行计划
+                result_writer->next();
+                // 等待所有线程完成
+                current_barrier->wait([&]() {
+                    result = std::move(result_writer->shared_.output_); // 由最后一个线程转移结果
+#ifdef DEBUG_LOG
+                    auto now = std::chrono::high_resolution_clock::now();
+                    auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+                    printf("result writer finish at %lu us\n", microseconds);
+#endif
+                });
+            });
+        }
+    }
+
+    // 等待所有线程结束
+    for (auto& t : threads) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+
+    // 销毁屏障
+    Barrier::destroy(barriers);
+
+    // 将query加入缓存
+    cache_manager.cacheQuery(query_cache);
+
+    global_profiler->print_profiles();
+    delete global_profiler;
+    global_profiler = nullptr;
+    return result;
+}
+
+
+void* build_context() {
+    global_profiler = new Profiler(1);
+    global_profiler->set_thread_id(0);
+
+    global_mempool.init();
+
+    global_profiler->print_profiles();
+    delete global_profiler;
+    global_profiler = nullptr;
+    return nullptr;
+}
+
+void destroy_context([[maybe_unused]] void* context) {
+    global_mempool.destroy();
+}
+} // namespace Contest
+
+
 //ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-////    namespace views = ranges::views;
-////    auto ret        = execute_impl(plan, plan.root);
-////    auto ret_types  = plan.nodes[plan.root].output_attrs
-////                   | views::transform([](const auto& v) { return std::get<1>(v); })
-////                   | ranges::to<std::vector<DataType>>();
-////    Table table{std::move(ret), std::move(ret_types)};
-////    return table.to_columnar();
+//    //    namespace views = ranges::views;
+//    //    auto ret        = execute_impl(plan, plan.root);
+//    //    auto ret_types  = plan.nodes[plan.root].output_attrs
+//    //                   | views::transform([](const auto& v) { return std::get<1>(v); })
+//    //                   | ranges::to<std::vector<DataType>>();
+//    //    Table table{std::move(ret), std::move(ret_types)};
+//    //    return table.to_columnar();
+//}
+
+//ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 //
 //#ifdef DEBUG_LOG
 //    printPlanTree(plan);    // 以人类可读的方式打印计划树
@@ -674,109 +716,3 @@ CacheManager cache_manager;     // 哈希表缓存管理器。放在这儿合适
 //    global_mempool.destroy();
 //    delete g_thread_pool;
 //}
-
-ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-//    namespace views = ranges::views;
-//    auto ret        = execute_impl(plan, plan.root);
-//    auto ret_types  = plan.nodes[plan.root].output_attrs
-//                   | views::transform([](const auto& v) { return std::get<1>(v); })
-//                   | ranges::to<std::vector<DataType>>();
-//    Table table{std::move(ret), std::move(ret_types)};
-//    return table.to_columnar();
-
-#ifdef DEBUG_LOG
-    printPlanTree(plan);    // 以人类可读的方式打印计划树
-#endif
-
-    size_t thread_num = threadNum(plan);                // 线程数
-    const int vector_size = 1024;                       // 向量化的批次大小
-    std::vector<std::thread> threads;                   // 线程池
-    std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
-    SharedStateManager shared_manager;                  // 创建共享状态
-    ColumnarTable result;                               // 执行结果
-    QueryCache* query_cache = cache_manager.getQuery(plan);           // 哈希表缓存
-    global_profiler = new Profiler(thread_num);
-    global_mempool.reset();
-
-    static int exec_cnt = 0;
-    if (++exec_cnt == 113) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
-    }
-
-    // 启动所有线程
-    for (size_t i = 0; i < thread_num; ++i) {
-        size_t barrier_group = i / Barrier::threads_per_barrier_;    // 每threads_per_barrier_个线程属于一个barrier_group
-
-        if (i == thread_num - 1) {
-            [&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
-                local_allocator.init(&global_mempool);
-                local_allocator.reuse();
-                global_profiler->set_thread_id(i);
-                ProfileGuard profile_guard(global_profiler, "execute");
-                // 确定当前线程的Barrier
-                current_barrier = barriers[barrier_group];
-                // 每个线程生成各自的执行计划
-                ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size, query_cache);
-                // 执行计划
-                result_writer->next();
-                // 等待所有线程完成
-                bool is_last = current_barrier->wait();
-                // 由最后一个线程转移结果
-                if (is_last) result = std::move(result_writer->shared_.output_);
-            }();
-        } else {
-            threads.emplace_back([&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
-                local_allocator.init(&global_mempool);
-                local_allocator.reuse();
-                global_profiler->set_thread_id(i);
-                ProfileGuard profile_guard(global_profiler, "execute");
-                // 确定当前线程的Barrier
-                current_barrier = barriers[barrier_group];
-                // 每个线程生成各自的执行计划
-                ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size, query_cache);
-                // 执行计划
-                result_writer->next();
-                // 等待所有线程完成
-                bool is_last = current_barrier->wait();
-                // 由最后一个线程转移结果
-                if (is_last) result = std::move(result_writer->shared_.output_);
-            });
-        }
-    }
-
-    // 等待所有线程结束
-    for (auto& t : threads) {
-        if (t.joinable()) {
-            t.join();
-        }
-    }
-
-    // 销毁屏障
-    Barrier::destroy(barriers);
-
-    // 将query加入缓存
-    cache_manager.cacheQuery(query_cache);
-
-    global_profiler->print_profiles();
-    delete global_profiler;
-    global_profiler = nullptr;
-    return result;
-}
-
-
-void* build_context() {
-    global_profiler = new Profiler(1);
-    global_profiler->set_thread_id(0);
-
-    global_mempool.init();
-
-    global_profiler->print_profiles();
-    delete global_profiler;
-    global_profiler = nullptr;
-    return nullptr;
-}
-
-void destroy_context([[maybe_unused]] void* context) {
-    global_mempool.destroy();
-}
-} // namespace Contest
