@@ -40,7 +40,9 @@ struct FilterThreadPool {
             }
             size_t begin = begin_idx(thread_id);
             size_t end   = begin_idx(thread_id + 1);
-            function(begin, end);
+            if (begin < end) {
+                function(begin, end);
+            }
             finished[thread_id] = true;
             lk.unlock();
             cv.notify_one();
