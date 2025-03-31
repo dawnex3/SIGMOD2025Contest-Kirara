@@ -490,6 +490,9 @@ size_t threadNum(const Plan& plan){
         all_scan_size += std::visit([&plan](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, ScanNode>) {
+//                if (plan.inputs[value.base_table_id].num_rows == 13369615)
+//                    puts("FILTER CORRECT!");
+//                printf("SIZE = %d, %d\n", value.base_table_id, plan.inputs[value.base_table_id].num_rows);
                 return plan.inputs[value.base_table_id].num_rows;
             } else {return static_cast<size_t>(0);}
         }, plan_node.data);
@@ -497,10 +500,10 @@ size_t threadNum(const Plan& plan){
     //    printf("total = %ld \t", all_scan_size);
     int thread_num = all_scan_size >= 10000000 ? std::min(64, std::max((SPC__THREAD_COUNT / 4 - (SPC__THREAD_COUNT % 4 == 0)) * 4, 24))
                                                : (all_scan_size >= 5000000 ? 24 : std::min(SPC__CORE_COUNT, 16));
-    if (SPC__THREAD_COUNT / SPC__CORE_COUNT == 8 && thread_num >= 64){
+    if (SPC__THREAD_COUNT / SPC__CORE_COUNT >= 4 && thread_num >= 64){
         thread_num = SPC__CORE_COUNT * 2;
     }
-    // thread_num = 1;
+//    thread_num = 1;
     return thread_num;
 }
 
@@ -628,6 +631,13 @@ CacheManager cache_manager;     // 哈希表缓存管理器。放在这儿合适
 //}
 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+//    namespace views = ranges::views;
+//    auto ret        = execute_impl(plan, plan.root);
+//    auto ret_types  = plan.nodes[plan.root].output_attrs
+//                   | views::transform([](const auto& v) { return std::get<1>(v); })
+//                   | ranges::to<std::vector<DataType>>();
+//    Table table{std::move(ret), std::move(ret_types)};
+//    return table.to_columnar();
 
 #ifdef DEBUG_LOG
    printPlanTree(plan);    // 以人类可读的方式打印计划树
@@ -641,13 +651,13 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
    QueryCache* query_cache = cache_manager.getQuery(plan);           // 哈希表缓存
    global_profiler = new Profiler(thread_num);
    global_mempool.reset();
-   static int exec_cnt = 0;
+//   static int exec_cnt = 0;
    std::condition_variable finish_cv;
    std::mutex finish_mtx;
 
-   if (++exec_cnt == 113) {
-       std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
-   }
+//   if (++exec_cnt == 113) {
+//       std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
+//   }
 
    // 启动所有线程
    for (size_t i = 0; i < thread_num; ++i) {
