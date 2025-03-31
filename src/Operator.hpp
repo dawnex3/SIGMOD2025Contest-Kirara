@@ -164,6 +164,7 @@ private:
 #ifdef DEBUG_LOG
     size_t      probe_rows_{0};
     size_t      output_rows_{0};
+    std::string table_str_;
 #endif
 
 public:
@@ -276,6 +277,10 @@ public:
                 columns_.~vector();
 #ifdef DEBUG_LOG
                 printf("naive join %zu: output_rows=%ld, probe_rows=%ld\n",shared_.get_operator_id()-1,output_rows_,probe_rows_);
+                //std::ofstream log("log_false.txt", std::ios::app);
+                //log << "naive join "<< shared_.get_operator_id()-1 <<" output rows: " << output_rows_ << ", details:\n";
+                //log << table_str_ <<std::endl;
+                //log.close();
 #endif
                 last_result_.num_rows_ = 0;
                 return last_result_;
@@ -308,6 +313,7 @@ public:
             if (n == 0) continue;
 #ifdef DEBUG_LOG
             output_rows_ += n;
+            //table_str_.append(last_result_.toString(false));
 #endif
 
             // 物化最终结果。
@@ -382,7 +388,7 @@ private:
     uint32_t * probe_keys_;                  // right_result_的键值列的哈希值与键值组合
     Hashmap::EntryHeader** build_matches_;  // 哈希表中匹配的条目
     uint32_t * probe_matches_;              // 构建侧匹配的行的行号
-    uint32_t * key_source_ = nullptr;
+    const uint32_t * key_source_ = nullptr;
 
     OperatorResultTable last_result_;       // 上一次调用next的返回结果。本次调用修改一些参数就可以返回。
     LocalVector<size_t> output_attrs_;      // 需要输出哪些列
@@ -398,7 +404,7 @@ private:
 #ifdef DEBUG_LOG
     size_t      probe_rows_{0};
     size_t      output_rows_{0};
-    std::string table_str;
+    std::string table_str_;
 #endif
 
 public:
@@ -557,11 +563,10 @@ public:
                     allocations_.~vector();
 #ifdef DEBUG_LOG
                     printf("join %zu: output_rows=%ld, probe_rows=%ld\n",shared_.get_operator_id()-1,output_rows_,probe_rows_);
-//                    std::cout<<table_str<<std::endl;
-//                    std::ofstream log("log_false.txt", std::ios::app);
-//                    log << "join "<< shared_.get_operator_id()-1 <<" output rows: " << output_rows_ << ", details:\n";
-//                    log << table_str <<std::endl;
-//                    log.close();
+                    //std::ofstream log("log_false.txt", std::ios::app);
+                    //log << "join "<< shared_.get_operator_id()-1 <<" output rows: " << output_rows_ << ", details:\n";
+                    //log << table_str_ <<std::endl;
+                    //log.close();
 #endif
                     return last_result_;
                 }
@@ -611,14 +616,14 @@ public:
             profile_guard.add_output_row_count(n);
 #ifdef DEBUG_LOG
             output_rows_ += n;
-//            table_str.append(last_result_.toString(true));
+            //table_str_.append(last_result_.toString(false));
 #endif
             return last_result_;
         }
     }
 
 #ifdef SIMD_SIZE
-    // 计算一列的哈希值，与该列本身一起组成uint64，存储到指定位
+    // 计算一列的哈希值，存储到指定位，将该列也存储到指定位置
     template <bool targetDense>
     void calculateColHash(OperatorResultTable::ColumnVariant input_column, size_t n, uint8_t* target, uint8_t* target_keys, size_t step){
         std::visit([&](auto&& arg) {
@@ -628,21 +633,12 @@ public:
                 assert(arg.first == DataType::INT32);
                 const int32_t* base = static_cast<int32_t*>(arg.second);
                 if constexpr (targetDense){
-                    key_source_ = static_cast<uint32_t*>(arg.second);;
+                    key_source_ = static_cast<uint32_t*>(arg.second);
                 } else {
                     key_source_ = probe_keys_;
                 }
 
                 size_t i = 0;
-                while (reinterpret_cast<uintptr_t>(base + i) % 32 != 0){
-                    *(uint32_t *)target = hash_32(base[i]);
-                    target += step;
-                    i++;
-                    if constexpr (!targetDense){
-                        *(uint32_t *)target_keys = base[i];
-                        target_keys += step;
-                    }
-                }
 
                 if constexpr (targetDense){
                     for (; i + SIMD_SIZE-1 < n; i += SIMD_SIZE) {
@@ -677,20 +673,54 @@ public:
                 const Column* col = std::get<0>(arg);
                 key_source_ = probe_keys_;
                 assert(col->type==DataType::INT32);
-                size_t processed = 0; 
                 size_t remaining = n;  
 
                 for (size_t i = std::get<1>(arg); i < col->pages.size(); i++) {
                     const Page* current_page = col->pages[i];
                     size_t start_row = (i == std::get<1>(arg)) ? std::get<2>(arg) : 0;
                     size_t end_row = std::min((size_t)getRowCount(current_page), start_row + remaining);
-                    if (true || __glibc_unlikely(getNonNullCount(current_page) != getRowCount(current_page))){
-//                        printf("unlikely! %d %d\n", getNonNullCount(current_page), getRowCount(current_page));
+                    if(__glibc_likely(getNonNullCount(current_page) == getRowCount(current_page))){
+                        const int32_t* base = getPageData<int32_t>(current_page) + start_row;
+                        size_t j = start_row;
+                        while (j < end_row) {
+                            if((j % 8 == 0) && (j + 8 <= end_row)){
+                                v8u32 keys;
+                                memcpy(&keys, base, sizeof(keys));
+                                base += 8;
+
+                                // 将向量存储到临时数组
+                                alignas(32) uint32_t hash_arr[SIMD_SIZE];
+                                compute_hashes(reinterpret_cast<const uint32_t*>(&keys), hash_arr);
+                                if (targetDense){
+                                    memcpy(target_keys, &keys, sizeof(keys));
+                                    memcpy(target, hash_arr, sizeof(hash_arr));
+                                    target += sizeof(v8u32);
+                                    target_keys += sizeof(v8u32);
+                                } else {
+                                    for (int k = 0; k < SIMD_SIZE; ++k) {
+                                        *(uint32_t*)target = hash_arr[k];
+                                        *(uint32_t*)(target_keys) = keys[k];
+                                        target += step;
+                                        target_keys += step;
+                                    }
+                                }
+                                j += 8;
+                            }else{
+                                int32_t key = *base++;
+                                uint32_t hash = hash_32(key);
+                                *(uint32_t*)target = hash;
+                                *(uint32_t*)(target_keys) = key;
+                                target += step;
+                                target_keys += step;
+                                j++;
+                            }
+                        }
+                    } else {
                         const uint8_t* bitmap = getBitmap(current_page);
                         const int32_t* base = getPageData<int32_t>(current_page) + getNonNullCount(bitmap, start_row);
                         size_t j = start_row;
-                        while (j < end_row && processed < n) { // 这个8不是SIMD_SIZE，而是byte / bit
-                            if ((j % 8 == 0) && (j + 8 <= end_row) && (processed + 8 <= n)) {
+                        while (j < end_row) { // 这个8不是SIMD_SIZE，而是byte / bit
+                            if ((j % 8 == 0) && (j + 8 <= end_row)) {
                                 size_t byte_idx = j / 8;
                                 uint8_t bitmap_byte = bitmap[byte_idx];
                                 int number_of_one = __builtin_popcount(bitmap_byte);
@@ -700,7 +730,7 @@ public:
                                     memcpy(&keys, base, sizeof(keys));
                                     base += 8;
                                 } else {
-                                    // 步骤1：将位图转换为有效位置掩码
+                                    // 将位图转换为有效位置掩码
                                     for (int k = 0; k < 8; k++) {
                                         if (isNotNull(bitmap, j + k)) {
                                             keys[k] = *base++;
@@ -711,16 +741,14 @@ public:
                                 }
 
                                 // 将向量存储到临时数组
+                                alignas(32) uint32_t hash_arr[SIMD_SIZE];
+                                compute_hashes(reinterpret_cast<const uint32_t*>(&keys), hash_arr);
                                 if constexpr (targetDense){
-                                    alignas(32) uint32_t hash_arr[SIMD_SIZE];
-                                    compute_hashes(reinterpret_cast<const uint32_t*>(&keys), hash_arr);
                                     memcpy(target_keys, &keys, sizeof(keys));
                                     memcpy(target, hash_arr, sizeof(hash_arr));
                                     target += sizeof(v8u32);
                                     target_keys += sizeof(v8u32);
                                 } else {
-                                    alignas(32) uint32_t hash_arr[SIMD_SIZE];
-                                    compute_hashes(reinterpret_cast<const uint32_t*>(&keys), hash_arr);
                                     for (int k = 0; k < SIMD_SIZE; ++k) {
                                         *(uint32_t*)target = hash_arr[k];
                                         *(uint32_t*)(target_keys) = keys[k];
@@ -728,7 +756,6 @@ public:
                                         target_keys += step;
                                     }
                                 }
-                                processed += 8;
                                 j += 8;
                             } else {
                                 int32_t key = NULL_INT32;
@@ -741,52 +768,12 @@ public:
                                 *(uint32_t*)(target_keys) = key;
                                 target += step;
                                 target_keys += step;
-                                processed++;
-                                j++;
-                            }
-                        }
-                    } else {
-                        const int32_t* base = getPageData<int32_t>(current_page) + start_row;
-                        size_t j = start_row;
-                        while (j < end_row && processed < n) {
-                            if((j % 8 == 0) && (j + 8 <= end_row) && (processed + 8 <= n)){
-                                v8u32 keys;
-                                memcpy(&keys, base, sizeof(keys));
-                                base += 8;
-
-                                // 将向量存储到临时数组
-                                if (targetDense){
-                                    alignas(32) uint32_t hash_arr[SIMD_SIZE];
-                                    compute_hashes(reinterpret_cast<const uint32_t*>(&keys), hash_arr);
-                                    memcpy(target_keys, &keys, sizeof(keys));
-                                    memcpy(target, hash_arr, sizeof(hash_arr));
-                                    target += sizeof(v8u32);
-                                    target_keys += sizeof(v8u32);
-                                } else {
-                                    alignas(32) uint32_t hash_arr[SIMD_SIZE];
-                                    compute_hashes(reinterpret_cast<const uint32_t*>(&keys), hash_arr);
-                                    for (int k = 0; k < SIMD_SIZE; ++k) {
-                                        *(uint32_t*)target = hash_arr[k];
-                                        *(uint32_t*)(target_keys) = keys[k];
-                                        target += step;
-                                        target_keys += step;
-                                    }
-                                }
-                                processed += 8;
-                                j += 8;
-                            }else{
-                                int32_t key = *base++;
-                                uint32_t hash = hash_32(key);
-                                *(uint32_t*)target = hash;
-                                *(uint32_t*)(target_keys) = key;
-                                target += step;
-                                target_keys += step;
-                                processed++;
                                 j++;
                             }
                         }
                     }
-                    remaining = n - processed;
+
+                    remaining -= (end_row - start_row);
                     if (remaining <= 0) break;
                 }
             }
@@ -1108,22 +1095,7 @@ public:
 //        return found;
 //    }
 
-    // join implementation after Peter's suggestions
-    uint32_t joinBoncz();
-    /// computes join result into build_matches_ and probe_matches_
-    /// Implementation: Using AVX 512 SIMD
-//    uint32_t joinAllSIMD();
-    /// computes join result into build_matches_ and probe_matches_, respecting
-    /// selection vector probeSel for probe side
-    uint32_t joinSel();
-    /// computes join result into build_matches_ and probe_matches_, respecting
-    /// selection vector probeSel for probe side
-    /// Implementation: optimized for long CPU pipelines
-    uint32_t joinSelParallel();
-    /// computes join result into build_matches_ and probe_matches_, respecting
-    /// selection vector probeSel for probe side
-    /// Implementation: For SkylakeX using AVX512
-    uint32_t joinSelSIMD();
+
 };
 
 
