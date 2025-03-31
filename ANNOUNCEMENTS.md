@@ -1,5 +1,9 @@
 # Announcements
 
+### 2025-03-31
+  - We addressed an issue in the provided framework and updated DuckDB. Thanks team SortMergeJoin for making us aware of these issues.
+  - We plan to allow teams to push simple fixes in case their code cannot be compiled on the hidden evaluation servers.
+
 ### 2025-03-27
   - Please read the following notes on `build_context()`, third-party libraries, and the final evaluation carefully
   - **`build_context()`**:
