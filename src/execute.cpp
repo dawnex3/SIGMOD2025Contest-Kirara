@@ -652,6 +652,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
    global_profiler = new Profiler(thread_num);
    global_mempool.reset();
 //   static int exec_cnt = 0;
+//   static int exec_cnt = 0;
    std::condition_variable finish_cv;
    std::mutex finish_mtx;
 
