@@ -277,10 +277,10 @@ public:
                 columns_.~vector();
 #ifdef DEBUG_LOG
                 printf("naive join %zu: output_rows=%ld, probe_rows=%ld\n",shared_.get_operator_id()-1,output_rows_,probe_rows_);
-                //std::ofstream log("log_false.txt", std::ios::app);
-                //log << "naive join "<< shared_.get_operator_id()-1 <<" output rows: " << output_rows_ << ", details:\n";
-                //log << table_str_ <<std::endl;
-                //log.close();
+                std::ofstream log("log_false.txt", std::ios::app);
+                log << "naive join "<< shared_.get_operator_id()-1 <<" output rows: " << output_rows_ << ", details:\n";
+                log << table_str_ <<std::endl;
+                log.close();
 #endif
                 last_result_.num_rows_ = 0;
                 return last_result_;
@@ -313,7 +313,7 @@ public:
             if (n == 0) continue;
 #ifdef DEBUG_LOG
             output_rows_ += n;
-            //table_str_.append(last_result_.toString(false));
+            table_str_.append(last_result_.toString(false));
 #endif
 
             // 物化最终结果。
@@ -563,10 +563,10 @@ public:
                     allocations_.~vector();
 #ifdef DEBUG_LOG
                     printf("join %zu: output_rows=%ld, probe_rows=%ld\n",shared_.get_operator_id()-1,output_rows_,probe_rows_);
-                    //std::ofstream log("log_false.txt", std::ios::app);
-                    //log << "join "<< shared_.get_operator_id()-1 <<" output rows: " << output_rows_ << ", details:\n";
-                    //log << table_str_ <<std::endl;
-                    //log.close();
+                    std::ofstream log("log_false.txt", std::ios::app);
+                    log << "join "<< shared_.get_operator_id()-1 <<" output rows: " << output_rows_ << ", details:\n";
+                    log << table_str_ <<std::endl;
+                    log.close();
 #endif
                     return last_result_;
                 }
@@ -616,7 +616,7 @@ public:
             profile_guard.add_output_row_count(n);
 #ifdef DEBUG_LOG
             output_rows_ += n;
-            //table_str_.append(last_result_.toString(false));
+            table_str_.append(last_result_.toString(false));
 #endif
             return last_result_;
         }
@@ -786,6 +786,11 @@ public:
         std::visit([&](auto&& arg) {
             using T = std::decay_t<decltype(arg)>;
             if constexpr (std::is_same_v<T, OperatorResultTable::InstantiatedColumn>) {
+                if constexpr (targetDense){
+                    key_source_ = static_cast<uint32_t*>(arg.second);
+                } else {
+                    key_source_ = probe_keys_;
+                }
                 // 已实例化的列为 std::pair<DataType, void*>，是一块连续的数组
                 assert(arg.first==DataType::INT32);
                 const int32_t* base = (int32_t*)arg.second;
@@ -799,6 +804,7 @@ public:
                 // 连续未实例化的列为 std::tuple<Column*, uint32_t, uint32_t>，它存放在多个Page中。
                 const Column* col = std::get<0>(arg);
                 assert(col->type==DataType::INT32);
+                key_source_ = probe_keys_;
 
                 for(size_t i=std::get<1>(arg); i<col->pages.size(); i++){
                     const Page* current_page = col->pages[i];                       // 要读取的页面
