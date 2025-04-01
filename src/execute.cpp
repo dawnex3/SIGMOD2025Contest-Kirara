@@ -490,6 +490,9 @@ size_t threadNum(const Plan& plan){
         all_scan_size += std::visit([&plan](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, ScanNode>) {
+//                if (plan.inputs[value.base_table_id].num_rows == 13369615)
+//                    puts("FILTER CORRECT!");
+//                printf("SIZE = %d, %d\n", value.base_table_id, plan.inputs[value.base_table_id].num_rows);
                 return plan.inputs[value.base_table_id].num_rows;
             } else {return static_cast<size_t>(0);}
         }, plan_node.data);
@@ -497,16 +500,144 @@ size_t threadNum(const Plan& plan){
     //    printf("total = %ld \t", all_scan_size);
     int thread_num = all_scan_size >= 10000000 ? std::min(64, std::max((SPC__THREAD_COUNT / 4 - (SPC__THREAD_COUNT % 4 == 0)) * 4, 24))
                                                : (all_scan_size >= 5000000 ? 24 : std::min(SPC__CORE_COUNT, 16));
-    if (SPC__THREAD_COUNT / SPC__CORE_COUNT == 8 && thread_num >= 64){
+    if (SPC__THREAD_COUNT / SPC__CORE_COUNT >= 4 && thread_num >= 64){
         thread_num = SPC__CORE_COUNT * 2;
     }
-    // thread_num = 1;
+//    thread_num = 1;
     return thread_num;
 }
 
 CacheManager cache_manager;     // 哈希表缓存管理器。放在这儿合适吗？是不是得移到build_context中。
 
+
+// ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+
+// #ifdef DEBUG_LOG
+//     printPlanTree(plan);    // 以人类可读的方式打印计划树
+// #endif
+
+//     size_t thread_num = threadNum(plan);                // 线程数
+//     const int vector_size = 1024;                       // 向量化的批次大小
+//     std::vector<std::thread> threads;                   // 线程池
+//     std::vector<Barrier*> barriers = Barrier::create(thread_num);     // 屏障组
+//     SharedStateManager shared_manager;                  // 创建共享状态
+//     ColumnarTable result;                               // 执行结果
+//     QueryCache* query_cache = cache_manager.getQuery(plan);           // 哈希表缓存
+//     global_profiler = new Profiler(thread_num);
+//     global_mempool.reset();
+
+//     static int exec_cnt = 0;
+//     if (++exec_cnt == 113) {
+//         std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
+//     }
+
+//     // 启动所有线程
+//     for (size_t i = 0; i < thread_num; ++i) {
+//         size_t barrier_group = i / Barrier::threads_per_barrier_;    // 每threads_per_barrier_个线程属于一个barrier_group
+
+//         if (i == thread_num - 1) {
+//             [&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
+//                 local_allocator.init(&global_mempool);
+//                 local_allocator.reuse();
+//                 global_profiler->set_thread_id(i);
+//                 ProfileGuard profile_guard(global_profiler, "execute");
+//                 // 确定当前线程的Barrier
+//                 current_barrier = barriers[barrier_group];
+//                 // 每个线程生成各自的执行计划
+//                 ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size, query_cache);
+//                 // 执行计划
+//                 result_writer->next();
+//                 // 等待所有线程完成
+//                 current_barrier->wait([&]() {
+//                     result = std::move(result_writer->shared_.output_); // 由最后一个线程转移结果
+// #ifdef DEBUG_LOG
+//                     auto now = std::chrono::high_resolution_clock::now();
+//                     auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+//                     printf("result writer finish at %lu us\n", microseconds);
+// #endif
+//                 });
+//             }();
+//         } else {
+//             threads.emplace_back([&plan, &shared_manager, &result, &barriers, barrier_group, i, &query_cache]() {
+//                 local_allocator.init(&global_mempool);
+//                 local_allocator.reuse();
+//                 global_profiler->set_thread_id(i);
+//                 ProfileGuard profile_guard(global_profiler, "execute");
+//                 // 确定当前线程的Barrier
+//                 current_barrier = barriers[barrier_group];
+//                 // 每个线程生成各自的执行计划
+//                 ResultWriter *result_writer = getPlan(plan,shared_manager,vector_size, query_cache);
+//                 // 执行计划
+//                 result_writer->next();
+//                 // 等待所有线程完成
+//                 current_barrier->wait([&]() {
+//                     result = std::move(result_writer->shared_.output_); // 由最后一个线程转移结果
+// #ifdef DEBUG_LOG
+//                     auto now = std::chrono::high_resolution_clock::now();
+//                     auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+//                     printf("result writer finish at %lu us\n", microseconds);
+// #endif
+//                 });
+//             });
+//         }
+//     }
+
+//     // 等待所有线程结束
+//     for (auto& t : threads) {
+//         if (t.joinable()) {
+//             t.join();
+//         }
+//     }
+
+//     // 销毁屏障
+//     Barrier::destroy(barriers);
+
+//     // 将query加入缓存
+//     cache_manager.cacheQuery(query_cache);
+
+//     global_profiler->print_profiles();
+//     delete global_profiler;
+//     global_profiler = nullptr;
+//     return result;
+// }
+
+
+// void* build_context() {
+//     global_profiler = new Profiler(1);
+//     global_profiler->set_thread_id(0);
+
+//     global_mempool.init();
+
+//     global_profiler->print_profiles();
+//     delete global_profiler;
+//     global_profiler = nullptr;
+//     return nullptr;
+// }
+
+// void destroy_context([[maybe_unused]] void* context) {
+//     global_mempool.destroy();
+// }
+// } // namespace Contest
+
+
+//ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+//    //    namespace views = ranges::views;
+//    //    auto ret        = execute_impl(plan, plan.root);
+//    //    auto ret_types  = plan.nodes[plan.root].output_attrs
+//    //                   | views::transform([](const auto& v) { return std::get<1>(v); })
+//    //                   | ranges::to<std::vector<DataType>>();
+//    //    Table table{std::move(ret), std::move(ret_types)};
+//    //    return table.to_columnar();
+//}
+
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+//    namespace views = ranges::views;
+//    auto ret        = execute_impl(plan, plan.root);
+//    auto ret_types  = plan.nodes[plan.root].output_attrs
+//                   | views::transform([](const auto& v) { return std::get<1>(v); })
+//                   | ranges::to<std::vector<DataType>>();
+//    Table table{std::move(ret), std::move(ret_types)};
+//    return table.to_columnar();
 
 #ifdef DEBUG_LOG
    printPlanTree(plan);    // 以人类可读的方式打印计划树
@@ -520,8 +651,13 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
    QueryCache* query_cache = cache_manager.getQuery(plan);           // 哈希表缓存
    global_profiler = new Profiler(thread_num);
    global_mempool.reset();
+//   static int exec_cnt = 0;
    std::condition_variable finish_cv;
    std::mutex finish_mtx;
+
+//   if (++exec_cnt == 113) {
+//       std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
+//   }
 
    // 启动所有线程
    for (size_t i = 0; i < thread_num; ++i) {
@@ -594,13 +730,3 @@ void destroy_context([[maybe_unused]] void *context) {
 }
 
 } // namespace Contest
-
-//ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-//        namespace views = ranges::views;
-//        auto ret        = execute_impl(plan, plan.root);
-//        auto ret_types  = plan.nodes[plan.root].output_attrs
-//                       | views::transform([](const auto& v) { return std::get<1>(v); })
-//                       | ranges::to<std::vector<DataType>>();
-//        Table table{std::move(ret), std::move(ret_types)};
-//        return table.to_columnar();
-//}

@@ -61,7 +61,7 @@ FetchContent_MakeAvailable(fmtlib)
 
 FetchContent_Declare(
     duckdb
-    URL https://github.com/duckdb/duckdb/archive/refs/tags/v1.2.0.tar.gz
+    URL https://github.com/duckdb/duckdb/archive/refs/tags/v1.2.1.tar.gz
 )
 set(ENABLE_SANITIZER OFF)
 set(ENABLE_UBSAN OFF)
