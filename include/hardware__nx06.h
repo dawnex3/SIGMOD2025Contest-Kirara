@@ -1,4 +1,4 @@
-// Hardware information for Intel Xeon E7-4880 v2 node sidon.
+// Hardware information for Intel Xeon Platinum 8352Y node nx06.
 
 // Architecture from `uname -srm`.
 #define SPC__X86_64
