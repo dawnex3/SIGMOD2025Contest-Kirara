@@ -71,7 +71,7 @@ jobs:
           curl -u "${{secrets.NEXTCLOUD_KEY}}" -H "X-Requested-With:XMLHttpRequest" "https://nextcloud.hpi.de/public.php/webdav/" -o server_files.zip
           unzip -o -P "${{secrets.SERVER_FILES_PW}}" server_files.zip
           mv duckdb/imdb.db .
-          ninja
+          ninja -C ${{env.BUILD_DIR}}
 
       - name: Run Query Plan Tests
         working-directory: ${{env.REPO_DIR}}
