@@ -42,6 +42,13 @@ jobs:
           # Clones the repository to the subdir `repo`.
           path: repo
 
+      - name: Copy Evaluation Files
+        working-directory: ${{env.REPO_DIR}}
+        run: |
+          curl -u "${{secrets.NEXTCLOUD_KEY}}" -H "X-Requested-With:XMLHttpRequest" "https://nextcloud.hpi.de/public.php/webdav/" -o server_files.zip
+          unzip -o -P "${{secrets.SERVER_FILES_PW}}" server_files.zip
+          mv duckdb/imdb.db .
+
       - name: Copy Hardware Header
         run: cp $REPO_DIR/include/hardware__`hostname`.h $REPO_DIR/include/hardware.h
 
@@ -64,14 +71,6 @@ jobs:
           echo $CUSTOM_RUNNER_NAME
           $CURL_CMD -F result=$EXIT_CODE -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_basic
           exit $EXIT_CODE
-
-      - name: Copy Evaluation Files
-        working-directory: ${{env.REPO_DIR}}
-        run: |
-          curl -u "${{secrets.NEXTCLOUD_KEY}}" -H "X-Requested-With:XMLHttpRequest" "https://nextcloud.hpi.de/public.php/webdav/" -o server_files.zip
-          unzip -o -P "${{secrets.SERVER_FILES_PW}}" server_files.zip
-          mv duckdb/imdb.db .
-          ninja -C ${{env.BUILD_DIR}}
 
       - name: Run Query Plan Tests
         working-directory: ${{env.REPO_DIR}}
