@@ -75,6 +75,7 @@ jobs:
       - name: Run Evaluation
         working-directory: ${{env.REPO_DIR}}
         run: |
+          ldconfig
           numactl -m 0 -N 0 ${{env.BUILD_DIR}}/run plans.json $BM_RESULT_FILE
           EXIT_CODE=$?
           $CURL_CMD -F runtime=`cat $BM_RESULT_FILE` -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_full_benchmark
