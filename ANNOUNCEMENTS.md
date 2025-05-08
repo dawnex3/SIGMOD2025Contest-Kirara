@@ -1,5 +1,9 @@
 # Announcements
 
+### 2025-05-08
+  - We needed to postpone announcing the final winners to May 14 due to hardware issues. We apologize for this delay.
+  - The announcement data should still allow winners to book early bird tickets for the upcoming SIGMOD conference.
+
 ### 2025-03-31
   - We addressed an issue in the provided framework and updated DuckDB. Thanks team SortMergeJoin for making us aware of these issues.
   - We plan to allow teams to push simple fixes in case their code cannot be compiled on the hidden evaluation servers.
