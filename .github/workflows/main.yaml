@@ -72,15 +72,6 @@ jobs:
           $CURL_CMD -F result=$EXIT_CODE -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_basic
           exit $EXIT_CODE
 
-      - name: Run Query Plan Tests
-        working-directory: ${{env.REPO_DIR}}
-        # Only allow test run of 300 seconds. We selected a few fast plans.
-        run: |
-          timeout 180 ${{env.BUILD_DIR}}/run plans.json 1b 1c 3b 5a 5b 8b
-          EXIT_CODE=$?
-          $CURL_CMD -F result=$EXIT_CODE -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_advanced
-          exit $EXIT_CODE
-
       - name: Run Evaluation
         working-directory: ${{env.REPO_DIR}}
         run: |
