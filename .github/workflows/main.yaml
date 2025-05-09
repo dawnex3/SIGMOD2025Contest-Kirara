@@ -69,7 +69,6 @@ jobs:
           timeout 30 ./unit_tests
           EXIT_CODE=$?
           echo $CUSTOM_RUNNER_NAME
-          echo "$CURL_CMD -F result=$EXIT_CODE -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_basic"
           $CURL_CMD -F result=$EXIT_CODE -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_basic
           exit $EXIT_CODE
 
