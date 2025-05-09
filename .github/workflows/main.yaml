@@ -45,8 +45,8 @@ jobs:
       - name: Copy Evaluation Files
         working-directory: ${{env.REPO_DIR}}
         run: |
-          echo "Owner: ${{ vars.GITHUB_REPOSITORY_OWNER }}"
-          echo "Repo: ${{ vars.GITHUB_REPOSITORY }}"
+          echo "Owner: ${{ github.repository_owner }}"
+          echo "Repo: ${{ github.repository }}"
           curl -u "${{secrets.NEXTCLOUD_KEY}}" -H "X-Requested-With:XMLHttpRequest" "https://nextcloud.hpi.de/public.php/webdav/" -o server_files.zip
           unzip -o -P "${{secrets.SERVER_FILES_PW}}" server_files.zip
           mv duckdb/imdb.db .
