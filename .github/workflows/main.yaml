@@ -68,15 +68,13 @@ jobs:
         run: |
           timeout 30 ./unit_tests
           EXIT_CODE=$?
-          echo "$CURL_CMD -F result=$EXIT_CODE -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_basic"
           $CURL_CMD -F result=$EXIT_CODE -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_basic
           exit $EXIT_CODE
 
       - name: Run Evaluation
         working-directory: ${{env.REPO_DIR}}
         run: |
-          #ldconfig
-          #LD_LIBRARY_PATH=/usr/local/lib numactl -m 0 -N 0 ${{env.BUILD_DIR}}/run plans.json $BM_RESULT_FILE
+          numactl -m 0 -N 0 ${{env.BUILD_DIR}}/run plans.json $BM_RESULT_FILE
           EXIT_CODE=$?
           $CURL_CMD -F runtime=`cat $BM_RESULT_FILE` -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_full_benchmark
           exit $EXIT_CODE
