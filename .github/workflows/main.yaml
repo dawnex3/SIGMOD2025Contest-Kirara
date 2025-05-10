@@ -72,13 +72,22 @@ jobs:
           exit $EXIT_CODE
 
       - name: Run Evaluation
+        if: matrix.arch == 'amd2'
+        working-directory: ${{env.REPO_DIR}}
+        run: |
+          numactl -m 0 -N 0 ${{env.BUILD_DIR}}/run plans.json $BM_RESULT_FILE
+          EXIT_CODE=$?
+          $CURL_CMD -F runtime=`cat $BM_RESULT_FILE` -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_full_benchmark
+          exit $EXIT_CODE
+
+      - name: Run Evaluation
+        if: matrix.arch != 'amd2'
         working-directory: ${{env.REPO_DIR}}
         run: |
           LD_LIBRARY_PATH=/usr/local/lib numactl -m 0 -N 0 ${{env.BUILD_DIR}}/run plans.json $BM_RESULT_FILE
           EXIT_CODE=$?
           $CURL_CMD -F runtime=`cat $BM_RESULT_FILE` -F runner_name=${RUNNER_NAME:-$FALLBACK_RUNNER_NAME} -F arch=${{ matrix.arch }} -F labels=${{ runner.labels }} -F git_commit=${{github.sha}} $LEADERBOARD/deliver_full_benchmark
           exit $EXIT_CODE
-
       - name: Clean Up
         if: always()
         run: rm -rf $REPO_DIR $BUILD_DIR
