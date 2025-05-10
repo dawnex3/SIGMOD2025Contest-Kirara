@@ -14,7 +14,7 @@ env:
 
   LEADERBOARD: https://sigmod-contest-25.hpi-sci.de
 
-  CURL_CMD: "curl -X POST --fail-with-body -F github_user=${{github.actor}} -F project_id=3 -F secret=${{secrets.HDP_SECRET}}"
+  CURL_CMD: "curl -X POST --fail-with-body -F github_user=${{github.actor}} -F github_repository=${{github.repository}} -F project_id=3 -F secret=${{secrets.HDP_SECRET}}"
 
   BM_RESULT_FILE: BENCHMARK_RUNTIME.txt
 
