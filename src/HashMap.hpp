@@ -9,9 +9,6 @@
 
 namespace Contest {
 #define NULL_HASH (1642857263)  // 这是NULL_INT32算出的哈希值（祈祷它不会发生碰撞）
-#if defined(SPC__SUPPORTS_AVX2) || defined(SPC__SUPPORTS_AVX) || \
-    defined(SPC__SUPPORTS_NEON) || defined(SPC__SUPPORTS_VSX) || \
-    defined(SPC__SUPPORTS_VMX) || defined(SPC__SUPPORTS_SVE) || defined(SPC__SUPPORTS_SVE2)
 #define SIMD_SIZE 8
 #define INIT_MACRO(X) X,X,X,X,X,X,X,X
 typedef uint32_t v8u32 __attribute__((__vector_size__(sizeof(uint32_t) * SIMD_SIZE)));
@@ -20,7 +17,6 @@ struct v8u64M {
     v8u64 vec;
     uint8_t mask;
 };
-#endif
 
 class Hashmap {
 public:

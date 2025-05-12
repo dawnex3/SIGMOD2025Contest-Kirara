@@ -504,7 +504,7 @@ size_t threadNum(const Plan& plan){
         thread_num = SPC__CORE_COUNT * 2;
     }
 //    thread_num = 1;
-    return thread_num;
+    return std::min(thread_num, SPC__THREAD_COUNT);
 }
 
 CacheManager cache_manager;     // 哈希表缓存管理器。放在这儿合适吗？是不是得移到build_context中。
@@ -654,6 +654,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 //   static int exec_cnt = 0;
    std::condition_variable finish_cv;
    std::mutex finish_mtx;
+   bool finished = false;
 
 //   if (++exec_cnt == 113) {
 //       std::this_thread::sleep_for(std::chrono::milliseconds(135000));   // 让cpu休息一下吧 :)
@@ -665,7 +666,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 
        g_thread_pool->assign_task(i, [&plan, &shared_manager, &result,
                                       &barriers, barrier_group, i,
-                                      &query_cache, &finish_cv, &finish_mtx]() {
+                                      &query_cache, &finish_cv, &finish_mtx, &finished]() {
          local_allocator.reuse();
          global_profiler->set_thread_id(i);
          ProfileGuard profile_guard(global_profiler, "execute");
@@ -683,6 +684,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
            result = std::move(result_writer->shared_.output_);
            {
                std::unique_lock lock(finish_mtx);
+               finished = true;
                finish_cv.notify_all();
            }
          }
@@ -692,7 +694,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
    // 等待所有线程结束
    {
        std::unique_lock lock(finish_mtx);
-       finish_cv.wait(lock);
+       finish_cv.wait(lock, [&]() { return finished; });
    }
 
    // 销毁屏障
