@@ -1,3 +1,22 @@
+/**
+ * @file MemoryPool.hpp
+ * @brief Suitable for situation with multiple memory allocations followed by unified release, such as SQL execution.
+ *
+ * Provides a global and thread-local memory pool for efficient memory allocation.
+ *
+ * This header defines a memory pool system consisting of a global pool (`GlobalPool`)
+ * and a thread-local allocator (`Allocator`). The memory pool is designed to efficiently
+ * allocate large blocks of memory, optionally using huge pages for performance.
+ * 
+ * Usage:
+ * - Use `local_allocator.allocate(size)` for fast thread-local allocations.
+ * - Use `LocalVector<T>` as a vector with custom allocator.
+ * - Define `NO_USE_MEMPOOL` to disable the memory pool and use standard allocation instead.
+ *
+ * @note Not thread-safe unless otherwise specified. Thread-local allocator is safe per-thread.
+ * @note Memory is not individually freed; reset or destroy the pool to reclaim memory.
+ */
+
 #pragma once
 #include <stdexcept>
 #include <sys/mman.h>
@@ -15,10 +34,6 @@
 #include <mutex>
 #include "hardware.h"
 #include "Profiler.hpp"
-
-//#ifdef SPC__PPC64LE
-//#define NO_USE_MEMPOOL
-//#endif
 
 namespace mem {
 inline void* malloc_huge(size_t size) {
