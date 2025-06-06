@@ -1,3 +1,26 @@
+/**
+ * @brief A static thread pool implementation with a fixed number of threads.
+ * 
+ * This class manages a pool of threads, each with its own task slot, mutex, and condition variable.
+ * Tasks can be assigned to specific threads, and each thread waits for its assigned task to execute.
+ * A global variable `g_thread_pool` is initialized when build_context() is called, and is provided 
+ * for use in the application.
+ * 
+ * @tparam ThreadCount The number of threads in the pool.
+ * 
+ * Usage:
+ * - Assign tasks to specific threads using assign_task().
+ * - The destructor ensures all threads are joined and resources are cleaned up.
+ * 
+ * Thread safety:
+ * - Each thread/task slot is protected by its own mutex and condition variable.
+ * 
+ * Example:
+ * @code
+ * g_thread_pool.assign_task(0, []{ task code });
+ * @endcode
+ */
+
 #pragma once
 
 #include <atomic>

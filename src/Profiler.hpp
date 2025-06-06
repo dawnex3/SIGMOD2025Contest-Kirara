@@ -1,3 +1,43 @@
+/**
+ * @file Profiler.hpp
+ * @brief Provides classes for profiling events and operator statistics in a
+ * multi-threaded environment.
+ *
+ * Usage:
+ * - Instantiate a `ProfileGuard` when entering a function or an event to
+ *   automatically start timing the event.
+ * - Use `ProfileGuard.add_input_row_count()` and `ProfileGuard.add_output_row_count()`
+ *   to track operator statistics.
+ *
+ * Macros:
+ * - All profiling methods are enabled only if `PROFILER` macro is defined.
+ *
+ * Note:
+ * - The Profiler significantly impacts performance. So it should only be
+ *   used in debug builds or when profiling is needed.
+ *
+ * Thread Safety:
+ * - The `Profiler` class is designed to be thread-safe.
+ *
+ * Code Example:
+ * @code
+ * function my_function() {
+ *     ProfileGuard guard(global_profiler, "my_function");
+ *     guard.event_begin("my_function");
+ *     // ... function logic ...
+ *     guard.event_end("my_function");
+ * }
+ * @endcode
+ * 
+ * Output Example:
+ * --------------------------------
+ * | thid | event1 | event2 | ... |
+ * | 0    | 100ms  | 200ms  | ... |
+ * | 1    | 150ms  | 250ms  | ... |
+ * | ...  | ...    | ...    | ... |
+ * --------------------------------
+ */
+ 
 #pragma once
 
 #include "fmt/base.h"
