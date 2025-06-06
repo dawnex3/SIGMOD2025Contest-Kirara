@@ -1,4 +1,11 @@
 [![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/J65KmzD7)
+# TeamKirara
+
+## Acknowledgment
+
+This project draws inspiration from and builds upon the concepts presented in the paper "Everything You Always Wanted to Know About Compiled and Vectorized Queries But Were Afraid to Ask" by Timo Kersten, Viktor Leis, Alfons Kemper, Thomas Neumann, Andrew Pavlo and Peter Boncz. We express our gratitude to the authors for their foundational work, which has significantly informed our approach.
+Additionally, portions of this project reference the open-source code repository located at https://github.com/TimoKersten/db-engine-paradigms/.
+
 # SIGMOD Contest 2025
 
 ## Task
