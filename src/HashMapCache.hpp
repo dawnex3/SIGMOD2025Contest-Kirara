@@ -3,35 +3,42 @@
 #include "HashMap.hpp"
 #include "DataStructure.hpp"
 
-//#define CACHE_LOG
+// THIS MODULE IS COMPLETELY UNUSED!
+// THIS MODULE IS COMPLETELY UNUSED!
+// THIS MODULE IS COMPLETELY UNUSED!
+// This module is used to cache queries that may occur multiple times,
+// such as the result of select * from xxx where a=2,
+// which can be used for select * from select * from xxx where a = 2 where b = 3
+// We did not use this module because it determines the same query by SAMPLING results.
+// This is highly likely to be correct, but theoretically it is still not guaranteed to be correct
 #define NO_CACHE
 
 namespace Contest {
 
-// Boost库的hash_combine实现
+// Implementation of hash_combine in Boost Library
 inline std::size_t hash_combine(std::size_t seed, std::size_t hash_value) {
-    // 0x9e3779b9是常用的魔数（来自黄金分割比例），用于带来良好的混合效果
+    // 0x9e3779b9 is a commonly used magic number (derived from the golden ratio) used to bring good mixing effects
     return seed ^ (hash_value + 0x9e3779b9 + (seed << 6) + (seed >> 2));
 }
 
 /**
- * @brief 计算范围 [first, last) 内元素的组合哈希值
- * @tparam InputIt 输入迭代器类型
- * @param first 范围起始迭代器
- * @param last 范围结束迭代器
- * @param seed 初始哈希种子 (默认为0)
- * @return 整个范围的组合哈希值
- *
- * @details
- * - 遍历范围时，每个元素的哈希值通过 hash_combine 合并到累积哈希中
- * - 使用 std::hash 计算单个元素的哈希值
- * - 空范围直接返回初始 seed
- * - 支持连续或非连续容器 (只要迭代器有效)
- */
+* @brief Calculate the combined hash value of elements within the range of [first, last]
+* @tparam InputIt Input Iterator Type
+* @param first The start iterator of the range
+* @param last The end iterator of the range
+* @param seed Initial hash seed (default is 0)
+* @return The combined hash value of the entire range
+*
+* @details
+* - When traversing the range, the hash value of each element is merged into the cumulative hash through hash_combine
+* - Use std::hash to calculate the hash value of a single element
+* - An empty range returns the initial seed directly
+* - Supports both contiguous and non-contiguous containers (as long as the iterators are valid)
+*/
 template <typename InputIt>
 std::size_t hash_range(InputIt first, InputIt last, std::size_t seed = 0) {
     using value_type = typename std::iterator_traits<InputIt>::value_type;
-    std::hash<value_type> hasher;  // 元素哈希计算器
+    std::hash<value_type> hasher;  // hash calculator
 
     for (; first != last; ++first) {
         const auto& element = *first;
@@ -43,27 +50,27 @@ std::size_t hash_range(InputIt first, InputIt last, std::size_t seed = 0) {
 }
 
 
-// 一个执行过的计划。包括复制下来的plan的nodes，以及plan的input表的一些采样数据。
-// 保存了执行中的哈希表。
+// A plan that has been executed. Including the nodes of the copied plan and some sampling data from the input table of the plan.
+// Save the hash table during execution.
 class QueryCache{
 public:
-    // 对一个column的采样
+    // Sampling a column.
     class ColumnSample{
     public:
         DataType                type_;
         size_t                  page_num_;
-        std::vector<uint64_t>   samples_;   // 对列的采样
-        uint64_t                hash_;      // 哈希值
+        std::vector<uint64_t>   samples_;   // Samples from the column.
+        uint64_t                hash_;      // Hash value.
 
-        inline static const size_t SAMPLE_SIZE = 20;    // 采样数目（最大）。实际采样数目是2倍SAMPLE_SIZE
+        inline static const size_t SAMPLE_SIZE = 20;    // Maximum number of samples. The actual number of samples is 2 * SAMPLE_SIZE.
 
-        // 采样一个列，生成哈希值。如果这个列是VARCHAR类型，不用采样了，哈希值设为无效。
+        // Sample a column and generate a hash value. If the column is of VARCHAR type, do not sample, and set the hash value to invalid.
         ColumnSample(const Column& column, size_t row_num) : type_(column.type), page_num_(column.pages.size()){
             if(type_!=DataType::INT32 || page_num_ == 0){
                 hash_ = INVALID_HASH;
                 return;
             }
-            // 等间距的采样出SAMPLE_SIZE个数据。如果page_num_>=SAMPLE_SIZE，被采样的每个page都不重复，此时采样pages的开头位置
+            // Sample SAMPLE_SIZE data points at equal intervals. If page_num_ >= SAMPLE_SIZE, each sampled page is unique, and we sample the beginning of these pages.
             if(page_num_ >= SAMPLE_SIZE){
                 double page_step = static_cast<double>(page_num_ - 1) / (SAMPLE_SIZE - 1);
                 for(size_t i=0; i<SAMPLE_SIZE; i++){
@@ -79,7 +86,7 @@ public:
                     }
                 }
             } else {
-                // 如果page_num_<SAMPLE_SIZE，那么有些page中需要采样多个数据。确定要采样的行号，对这些行做采样。
+                // If page_num_ < SAMPLE_SIZE, multiple data points need to be sampled from some pages. Determine the row numbers to be sampled and sample these rows.
                 size_t sample_size = std::min(row_num, SAMPLE_SIZE);
                 if(sample_size==1){
                     samples_.push_back(*(uint64_t*)(column.pages[0]->data));
@@ -102,7 +109,7 @@ public:
             hash_ = hash_range(samples_.begin(),samples_.end());
         }
 
-        // 相等比较运算符
+        // Equality comparison operator.
         bool operator==(const ColumnSample &other) const {
             return type_ == other.type_
                 && page_num_ == other.page_num_
@@ -115,17 +122,17 @@ public:
         }
     };
 
-    // 对一个表中的多个列的采样
+    // Sampling multiple columns in a table.
     class TableSample{
     public:
         size_t                          num_rows_{0};
         std::map<size_t,ColumnSample>   column_samples_;
     };
 
-    // DONT_CACHE: 不要缓存。可能该节点是scan，或者该join的构建侧包含VARCAHR，或者深度过深，或者被释放掉了
-    // NEED_CACHE: 需要缓存。表明该节点希望得到缓存。经过查找缓存和实际执行后，变为USE_CACHE或者OWN_CACHE
-    // USE_CACHE: 使用缓存。此时对应的hashmaps_中存储的是被缓存的哈希表
-    // OWN_CACHE: 拥有缓存。此时对应的hashmaps_中存储的是该语句执行中生成的哈希表
+    // DONT_CACHE: Do not cache. The node might be a scan, the build side of the join might contain VARCHAR, the depth might be too large, or it might have been released.
+    // NEED_CACHE: Needs caching. Indicates that this node desires to be cached. After cache lookup and actual execution, it becomes USE_CACHE or OWN_CACHE.
+    // USE_CACHE: Using cache. The corresponding hashmaps_ entry stores the cached hash table.
+    // OWN_CACHE: Owns the cache. The corresponding hashmaps_ entry stores the hash table generated during the execution of this statement.
     enum CacheType{DONT_CACHE, NEED_CACHE, USE_CACHE, OWN_CACHE};
 
     QueryCache(const Plan& plan, const std::vector<ColumnarTable>* input=nullptr)
@@ -141,12 +148,12 @@ public:
 #ifdef NO_CACHE
         return;
 #endif
-        // 计算各节点哈希值
+        // Calculate the hash values for each node.
         calculateNodeHash(plan,plan.root,input);
     }
 
     ~QueryCache(){
-        // 释放所有的哈希表
+        // Release all hash tables.
         for(size_t i=0; i<nodes_.size(); i++){
             if(cache_types_[i]!=USE_CACHE && hashmaps_[i]!=nullptr){
                 delete hashmaps_[i];
@@ -155,7 +162,7 @@ public:
     }
 
     void print() const{
-        // 打印节点得到哈希值和类型
+        // Print the hash value and type of the node.
         for(size_t i=0; i<nodes_.size(); i++){
             if(isJoinNode(i)){
                 printf("Join %zu ", i);
@@ -173,7 +180,7 @@ public:
             }
         }
 
-        // 打印基表采样结果
+        // Print the sampling results of the base tables.
         for(size_t i=0; i<inputs_sample_.size(); i++){
             const TableSample& table_sample = inputs_sample_[i];
             for(const auto& [col_id, col_sample]:table_sample.column_samples_){
@@ -190,25 +197,25 @@ public:
         }
     }
 
-    // 生成一个哈希表
+    // Generate a hash table.
     inline void generateCache(size_t node_id){
         cache_types_[node_id] = OWN_CACHE;
         hashmaps_[node_id] = new Hashmap();
     }
 
-    // 生成一个哈希表，但是这个哈希表不要保留为缓存
+    // Generate a hash table, but do not keep it as a cache.
     inline void generateTmpCache(size_t node_id){
         cache_types_[node_id] = DONT_CACHE;
         hashmaps_[node_id] = new Hashmap();
     }
 
-    // 使用哈希表缓存
+    // Use a hash table from the cache.
     inline void setCache(size_t node_id, Hashmap* hashmap){
         cache_types_[node_id] = USE_CACHE;
         hashmaps_[node_id] = hashmap;
     }
 
-    // 无效化该节点上的缓存（如果有）
+    // Invalidate the cache on this node (if any).
     inline void invalidCache(size_t node_id){
         if(cache_types_[node_id] != USE_CACHE && hashmaps_[node_id]!= nullptr){
             delete hashmaps_[node_id];
@@ -258,7 +265,7 @@ public:
         return std::holds_alternative<JoinNode>(nodes_[node_id].data);
     }
 
-    // 判断两个query中的指定节点（的输出）是否完全相同
+    // Check if the specified nodes (their outputs) in two queries are identical.
     bool isSame(size_t node_id, const QueryCache* other_query, size_t other_node_id) const{
         uint64_t this_hash = hashes_[node_id];
         uint64_t other_hash = other_query->hashes_[other_node_id];
@@ -276,7 +283,7 @@ public:
             const ScanNode& this_scan = std::get<ScanNode>(this_node.data);
             const ScanNode& other_scan = std::get<ScanNode>(other_node.data);
 
-            // 比较两个scan是否完全相同
+            // Compare if two scans are identical.
             if(this_node.output_attrs.size()!=other_node.output_attrs.size()){
                 return false;
             }
@@ -299,7 +306,7 @@ public:
             if(this_join.left_attr!=other_join.left_attr || this_join.right_attr!=other_join.right_attr){
                 return false;
             }
-            // 递归比较左右两侧的节点
+            // Recursively compare the left and right side nodes.
             if(!isSame(this_join.left,other_query,other_join.left)){
                 return false;
             }
@@ -310,7 +317,7 @@ public:
         return true;
     }
 
-    // 判断两个query中的指定Join节点的构建侧是否完全相同
+    // Check if the build sides of the specified Join nodes in two queries are identical.
     bool isBuildSideSame(size_t node_id, const QueryCache* other_query, size_t other_node_id) const{
         if(!isJoinNode(node_id) || !other_query->isJoinNode(other_node_id)){
             return false;
@@ -323,7 +330,7 @@ public:
         return isSame(build_node, other_query, other_build_node);
     }
 
-    // 获取本query保存的哈希表的大小
+    // Get the size of the hash tables saved by this query.
     size_t getCacheSize() const{
         size_t total_size=0;
         for(size_t i=0; i<cache_types_.size(); i++){
@@ -344,16 +351,16 @@ private:
     std::vector<TableSample> inputs_sample_;
     size_t root;
 
-    inline static const uint64_t INVALID_HASH=1;   // 无效的哈希值
-    std::vector<uint64_t> hashes_;          // 每个节点（输出）的哈希值
+    inline static const uint64_t INVALID_HASH=1;   // Invalid hash value.
+    std::vector<uint64_t> hashes_;          // Hash value of each node (output).
 
-    std::vector<CacheType> cache_types_;    // 每个节点是否需要缓存哈希表
-    std::vector<Hashmap*> hashmaps_;        // 每个（join）节点（构建侧）的哈希表（可能是空的）
+    std::vector<CacheType> cache_types_;    // Whether each node needs to cache its hash table.
+    std::vector<Hashmap*> hashmaps_;        // Hash table for each (join) node (on its build side) (can be empty).
 
-    static const size_t MAX_NODE_DEPTH=3;   // 深度超过MAX_NODE_DEPTH的节点不缓存
-    std::vector<size_t> node_depth_;        // 每个节点的深度。scan节点深度为0，join节点深度为其构建侧深度+1
+    static const size_t MAX_NODE_DEPTH=3;   // Nodes with depth exceeding MAX_NODE_DEPTH are not cached.
+    std::vector<size_t> node_depth_;        // Depth of each node. Scan node depth is 0, join node depth is its build side depth + 1.
 
-    // 对table_id的col_id列做采样并存储
+    // Sample and store the col_id column of table_id.
     inline void addColumnSamples(size_t table_id, size_t col_id, const Column& column){
         if(inputs_sample_[table_id].column_samples_.find(col_id) == inputs_sample_[table_id].column_samples_.end()){
             inputs_sample_[table_id].column_samples_.emplace(col_id, ColumnSample(column, getTableSize(table_id)));
@@ -372,7 +379,7 @@ private:
         return inputs_sample_[table_id].num_rows_;
     }
 
-    // 计算nodes_中node_id节点的哈希值，基于当前QueryCache中已经计算的节点的哈希值
+    // Calculate the hash value of the node_id in nodes_, based on the already calculated hash values in the current QueryCache.
     uint64_t calculateNodeHash(const Plan& plan, size_t node_id, const std::vector<ColumnarTable>* input){
         if(hashes_[node_id] != INVALID_HASH){
             return hashes_[node_id];
@@ -384,7 +391,7 @@ private:
         return std::visit([&](auto&& node_data) -> uint64_t {
             using T = std::decay_t<decltype(node_data)>;
             if constexpr (std::is_same_v<T, ScanNode>) {
-                // 如果表中含有VARCHAR列，不再采样，直接设为无效哈希值
+                // If the table contains a VARCHAR column, do not sample and set the hash value to invalid.
                 for(auto [_, col_type] : node_output){
                     if(col_type!=DataType::INT32){
                         hashes_[node_id] = INVALID_HASH;
@@ -393,28 +400,28 @@ private:
                     }
                 }
 
-                // 对基表做采样
+                // Sample the base table.
                 size_t table_id = node_data.base_table_id;
                 std::vector<uint64_t> col_hashes;
                 for(auto [col_id, _] : node_output){
-                    // 对该列做采样，存储到TableSample中
+                    // Sample this column and store it in TableSample.
                     const Column& column = (*input)[table_id].columns[col_id];
                     addColumnSamples(table_id, col_id, column);
                     col_hashes.push_back(getColumnHash(table_id, col_id));
                 }
 
-                // 依据基表各列的哈希值，以及基表的总行数，生成scan节点的哈希值
+                // Generate the hash value for the scan node based on the hash values of each column of the base table and the total number of rows.
                 uint64_t scan_hash = hash_range(col_hashes.begin(),col_hashes.end(),getTableSize(table_id));
                 hashes_[node_id] = scan_hash;
                 node_depth_[node_id] = 0;
                 return scan_hash;
             } else if constexpr (std::is_same_v<T, JoinNode>) {
-                // 分获取左右算子的哈希值，如果任意一侧无效，则设置该节点哈希值为无效
+                // Get the hash values of the left and right operators respectively. If either side is invalid, set this node's hash value to invalid.
                 uint64_t left_hash = calculateNodeHash(plan,node_data.left,input);
                 uint64_t right_hash = calculateNodeHash(plan,node_data.right,input);
                 node_depth_[node_id] = node_data.build_left ? node_depth_[node_data.left] : node_depth_[node_data.right];
                 node_depth_[node_id] ++;
-                // 判断本join的哈希表是否需要被被缓存
+                // Determine if the hash table of this join needs to be cached.
                 if(node_depth_[node_id] <= MAX_NODE_DEPTH &&
                     ((node_data.build_left && left_hash!=INVALID_HASH) || (!node_data.build_left && right_hash!=INVALID_HASH))){
                     cache_types_[node_id]=NEED_CACHE;
@@ -426,11 +433,11 @@ private:
                 std::vector<uint64_t> datas;
                 datas.push_back(left_hash);
                 datas.push_back(right_hash);
-                // 加入构建侧、键值列号信息
+                // Add information about the build side and key column numbers.
                 datas.push_back(node_data.build_left);
                 datas.push_back(node_data.left_attr);
                 datas.push_back(node_data.right_attr);
-                // 加入输出行号信息
+                // Add output row number information.
                 for(auto [col_id, _] : node_output){
                     datas.push_back(col_id);
                 }
@@ -443,42 +450,42 @@ private:
 };
 
 
-// 负责哈希表缓存的查找与淘汰
+// Responsible for hash table cache lookup and eviction.
 class CacheManager{
-    // 保存的所有QueryCache。最后面的是最新被使用的，淘汰时淘汰最前面的。
+    // All saved QueryCache instances. The last one is the most recently used; the first one is evicted.
     std::vector<QueryCache*> queries_;
 
-    // 使用 list 存储哈希表缓存，最前面的是使用最少的哈希表，最后面的是最新被使用的哈希表。
-    // pair<queries_的下标，QueryCache.hashmaps_的下标>
+    // Use a list to store the hash table cache. The front contains the least recently used hash table, and the back contains the most recently used.
+    // pair<index in queries_, index in QueryCache.hashmaps_>
     std::list<std::pair<size_t, size_t>> hashmap_caches_;
 
-    // unordered_map 用于将节点哈希值映射到 list 中对应位置的迭代器，方便查找和移动操作。
+    // unordered_map is used to map node hash values to iterators in the list for easy lookup and move operations.
     std::unordered_map<uint64_t, std::list<std::pair<size_t, size_t>>::iterator> caches_map_;
 
-    inline static const size_t MAX_CACHE_SIZE = 1024ULL * 1024 * 1024 * 20;    // 缓存的最大字节数，最多20G
-    size_t cache_size_{0};     // 记录了hashmap_caches_中保存的所有哈希表的总字节数目
+    inline static const size_t MAX_CACHE_SIZE = 1024ULL * 1024 * 1024 * 20;    // Maximum cache size in bytes, up to 20GB.
+    size_t cache_size_{0};     // Records the total byte size of all hash tables saved in hashmap_caches_.
 
 public:
     ~CacheManager(){
-        // 释放所有申请的内存
+        // Free all allocated memory.
         for(auto query:queries_){
             delete query;
         }
     }
 
-    // 生成一条语句。为这条语句使用可能的缓存。
+    // Generate a query. Use possible caches for this query.
     QueryCache* getQuery(const Plan& plan, const std::vector<ColumnarTable>* input=nullptr){
         QueryCache* query = new QueryCache(plan,input);
 
-        // 检查query的每个join节点的哈希表是否可以缓存
+        // Check if the hash table of each join node in the query can be cached.
         for(size_t i=0; i<query->getNodeNum(); i++){
-            // 这是为了naive join的适配
+            // This is for adapting to naive joins.
             if(query->isNaiveJoin(i)){
                 query->invalidCache(i);
                 continue;
             }
             if(query->getCacheType(i)==QueryCache::NEED_CACHE){
-                // 获取该join的构建侧节点的哈希值
+                // Get the hash value of the build side node of this join.
                 uint64_t node_hash = query->getBuildSideHash(i);
                 if(caches_map_.find(node_hash)!=caches_map_.end()){
                     auto it = caches_map_.at(node_hash);
@@ -488,18 +495,18 @@ public:
 #ifdef CACHE_LOG
                         printf("use cached hashmap: query %lu node %lu\n", query_id, node_id);
 #endif
-                        hashmap_caches_.splice(hashmap_caches_.end(), hashmap_caches_, it);     // 将复用的哈希表移到末尾
+                        hashmap_caches_.splice(hashmap_caches_.end(), hashmap_caches_, it);     // Move the reused hash table to the end.
                         query->setCache(i,cached_query->getHashmap(node_id));
                         continue;
                     }
                 }
-                // 没有缓存的情况下，为该节点生成一个哈希表
+                // If there is no cache, generate a hash table for this node.
                 query->generateCache(i);
 #ifdef CACHE_LOG
                 printf("generate cached hashmap: query %lu node %lu\n", queries_.size(), i);
 #endif
             } else if(query->isJoinNode(i)){
-                // 就算不需要缓存，Join节点也需要生成哈希表
+                // Even if caching is not needed, a Join node still needs to generate a hash table.
                 query->generateTmpCache(i);
 #ifdef CACHE_LOG
                 printf("generate tmp hashmap: query %lu node %lu\n", queries_.size(), i);
@@ -513,12 +520,12 @@ public:
         return query;
     }
 
-    // 将已经执行完毕的query，加入到缓存当中
+    // Add an executed query to the cache.
     void cacheQuery(QueryCache* query){
         queries_.push_back(query);
 
 #ifdef NO_CACHE
-        // 释放query中的所有hashmap
+        // Release all hashmaps in the query.
         for(size_t i=0; i<query->getNodeNum(); i++){
             query->invalidCache(i);
         }
@@ -528,11 +535,11 @@ public:
         size_t query_size = query->getCacheSize();
 
         if(query_size > MAX_CACHE_SIZE){
-            return;     // 这可能吗？
+            return;     // Is this possible?
         }
 
         while(cache_size_ + query_size > MAX_CACHE_SIZE){
-            // 空间已满，需要释放一些缓存
+            // The space is full, need to free some cache.
             auto [query_id, node_id] = hashmap_caches_.front();
             hashmap_caches_.pop_front();
             caches_map_.erase(queries_[query_id]->getBuildSideHash(node_id));
@@ -544,7 +551,7 @@ public:
 #endif
         }
 
-        // 将本查询中的OWN_CACHE的节点加入到缓存中。清理不需要缓存的哈希表
+        // Add the OWN_CACHE nodes from this query to the cache. Clean up hash tables that do not need to be cached.
         for(size_t i=0; i<query->getNodeNum(); i++){
             if(query->isJoinNode(i)){
                 QueryCache::CacheType type = query->getCacheType(i);

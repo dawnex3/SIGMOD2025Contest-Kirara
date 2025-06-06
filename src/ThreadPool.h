@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <hardware.h>
+#include "hardware.h"
 #include "MemoryPool.hpp"
 
 template <size_t ThreadCount>
