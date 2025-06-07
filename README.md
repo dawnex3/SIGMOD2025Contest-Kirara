@@ -1,5 +1,49 @@
-[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/J65KmzD7)
 # TeamKirara
+
+## Team Members
+
+Our team is composed of passionate students dedicated to high-performance database systems.
+
+| Name             | University                      | Contact             |
+|------------------|---------------------------------|---------------------|
+| **Xiang Liming** | Beijing Institute of Technology | `dawnex@163.com`    |
+| Feng Jing        | Beijing Institute of Technology | `1330827323@qq.com` |
+| Shao Yibo        | Beijing Institute of Technology | `1626295293@qq.com` |
+| Yu Yongze        | Xidian University               | `uuz163@gmail.com`  |
+| Hou Jiaxi        | Beijing Institute of Technology | `[TODO]`            |
+
+We are always open to collaboration and feedback!
+
+## Features
+
+This project is our submission for the **SIGMOD Contest 2025**, achieving **2nd place** in the final evaluation. For detailed information on the contest problem, environment, and execution instructions, please refer to the official [SIGMOD Contest 2025 website](https://sigmod-contest-2025.github.io/).
+
+### Key Features
+
+*   **Vectorized Volcano-Style Execution Engine**: Implements a modern, pull-based query processing model. The engine is composed of physical operators (`Scan`, `HashJoin`, etc.) that each process data in batches (`OperatorResultTable`). The query plan is executed by pulling results from the root, creating a highly efficient, demand-driven data flow.
+
+*   **Correct Handling of the Provided Page Structure**: The engine correctly parses and processes the contest-provided paged data layout. This includes accurately reading fixed-width values, handling nullability bitmaps, and resolving variable-length string data from its complex, paged representation.
+
+*   **Optimized Columnar Abstraction with Delayed Materialization**:
+    *   **Unified Column Interface**: A carefully designed `ColumnInterface` abstraction allows operators to process data transparently, regardless of its physical storage.
+    *   **Delayed Materialization**: The engine defaults to using `ContinuousColumn`, which reads data directly from the original paged storage on demand. Data is only copied into a contiguous buffer (`InstantiatedColumn`) when absolutely necessary. This strategy of **delaying materialization** significantly reduces data copying overhead and memory footprint throughout the query pipeline.
+
+*   **Advanced Parallel Execution & Synchronization**:
+    *   **Parallel-Aware Operators**: Core operators like `Scan` and `HashJoin` are designed for multi-threaded execution, using atomic operations for task distribution and resumable stages to fit the iterator model.
+    *   **Adaptive Join Strategy**: The engine automatically selects the optimal join algorithm, such as using a highly-optimized `NaiveJoin` for single-row build sides to avoid hash table overhead.
+    *   **Hierarchical Barrier**: A custom tree-structured barrier is used for efficient, low-overhead synchronization of a large number of worker threads.
+    *   **Task-Based Thread Pool**: A static thread pool manages a fixed set of worker threads, allowing for fine-grained task assignment and execution on multi-core systems.
+
+*   **High-Performance Memory Management**:
+    *   **Two-Level Memory Pool**: A high-performance memory system featuring a `GlobalPool` that pre-allocates a large memory block (optionally with huge pages) and `thread_local` allocators that serve requests via fast, lock-free pointer bumping.
+    *   **Custom STL Allocators**: Provides a `LocalVector<T>` alias, allowing standard containers to benefit from the high-performance memory pool, drastically reducing the overhead of `malloc`/`free`.
+
+*   **Highly Parallelized with SIMD**:
+    *   Extensive use of SIMD (Single Instruction, Multiple Data) intrinsics to accelerate core computational primitives and data processing operations.
+
+*   **Developer-Friendly Tooling**:
+    *   **Comprehensive Code-Level Documentation**: The codebase is thoroughly documented with standardized, Doxygen-style comments to facilitate understanding and maintenance.
+    *   **Built-in, Multi-Threaded Profiler**: A thread-safe profiler allows for detailed performance analysis of events and operator statistics (e.g., input/output row counts) on a per-thread basis, crucial for identifying bottlenecks.
 
 ## Acknowledgment
 
