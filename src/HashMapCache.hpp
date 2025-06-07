@@ -1,40 +1,46 @@
+/**
+* @file HashMapCache.hpp
+* @brief Defines a caching system for hash join tables to accelerate recurring subqueries.
+*
+* @warning THIS ENTIRE MODULE IS DISABLED BY THE `NO_CACHE` MACRO AND IS NOT USED
+* IN THE FINAL EXECUTION LOGIC. It represents a proof-of-concept for a cache that
+* was ultimately not used, primarily because its method for identifying identical
+* subqueries relies on data sampling. While this approach is often effective, it is
+* probabilistic and does not provide a 100% guarantee of correctness, which may be
+* unacceptable for a database system.
+*
+* The intended design was to:
+* 1.  **Identify recurring sub-plans:** `QueryCache` would analyze a query plan,
+*     sample its input data, and generate a structural and data-based hash for each node.
+* 2.  **Cache hash tables:** `CacheManager` would act as a global, LRU-based cache.
+*     When a query's sub-plan hash matched a previously cached entry, the pre-built
+*     hash table (`Hashmap`) would be reused, skipping the expensive build phase of a hash join.
+* 3.  **Probabilistic Matching:** The correctness of the cache hit depended on comparing
+*     the plan structure and a small sample of the underlying data.
+*/
+
 #include <list>
 #include "plan.h"
 #include "HashMap.hpp"
 #include "DataStructure.hpp"
 
-// THIS MODULE IS COMPLETELY UNUSED!
-// THIS MODULE IS COMPLETELY UNUSED!
-// THIS MODULE IS COMPLETELY UNUSED!
-// This module is used to cache queries that may occur multiple times,
-// such as the result of select * from xxx where a=2,
-// which can be used for select * from select * from xxx where a = 2 where b = 3
-// We did not use this module because it determines the same query by SAMPLING results.
-// This is highly likely to be correct, but theoretically it is still not guaranteed to be correct
-#define NO_CACHE
-
+// The comments below describe the intended functionality of this disabled module.
 namespace Contest {
 
-// Implementation of hash_combine in Boost Library
+/// @brief Combines a seed with a new hash value to produce a new seed.
 inline std::size_t hash_combine(std::size_t seed, std::size_t hash_value) {
     // 0x9e3779b9 is a commonly used magic number (derived from the golden ratio) used to bring good mixing effects
     return seed ^ (hash_value + 0x9e3779b9 + (seed << 6) + (seed >> 2));
 }
 
 /**
-* @brief Calculate the combined hash value of elements within the range of [first, last]
-* @tparam InputIt Input Iterator Type
-* @param first The start iterator of the range
-* @param last The end iterator of the range
-* @param seed Initial hash seed (default is 0)
-* @return The combined hash value of the entire range
-*
-* @details
-* - When traversing the range, the hash value of each element is merged into the cumulative hash through hash_combine
-* - Use std::hash to calculate the hash value of a single element
-* - An empty range returns the initial seed directly
-* - Supports both contiguous and non-contiguous containers (as long as the iterators are valid)
-*/
+ * @brief Calculates a combined hash value for a range of elements.
+ * @tparam InputIt The type of the input iterator.
+ * @param first The start iterator of the range.
+ * @param last The end iterator of the range.
+ * @param seed An initial seed for the hash calculation.
+ * @return The combined hash value for the entire range.
+ */
 template <typename InputIt>
 std::size_t hash_range(InputIt first, InputIt last, std::size_t seed = 0) {
     using value_type = typename std::iterator_traits<InputIt>::value_type;
@@ -50,11 +56,21 @@ std::size_t hash_range(InputIt first, InputIt last, std::size_t seed = 0) {
 }
 
 
-// A plan that has been executed. Including the nodes of the copied plan and some sampling data from the input table of the plan.
-// Save the hash table during execution.
+/**
+ * @class QueryCache
+ * @brief Represents a single query's potential for caching.
+ *
+ * This class analyzes a `Plan`, samples its input data to create a statistical
+ * fingerprint, and computes a hash for each node. This information is then used by
+ * the `CacheManager` to determine if any sub-plans (specifically, the build sides
+ * of hash joins) are identical to previously executed queries and can be reused.
+ */
 class QueryCache{
 public:
-    // Sampling a column.
+    /**
+     * @class ColumnSample
+     * @brief A statistical fingerprint of a single column, based on a small sample of its data.
+     */
     class ColumnSample{
     public:
         DataType                type_;
@@ -64,7 +80,14 @@ public:
 
         inline static const size_t SAMPLE_SIZE = 20;    // Maximum number of samples. The actual number of samples is 2 * SAMPLE_SIZE.
 
-        // Sample a column and generate a hash value. If the column is of VARCHAR type, do not sample, and set the hash value to invalid.
+        /**
+         * @brief Constructs a sample by reading a few data points from a column.
+         *
+         * The sampling is a heuristic. It does not sample VARCHAR columns. For INT32,
+         * it takes a few values spread across the column's pages to generate a hash.
+         * @param column The column to sample.
+         * @param row_num The total number of rows in the column.
+         */
         ColumnSample(const Column& column, size_t row_num) : type_(column.type), page_num_(column.pages.size()){
             if(type_!=DataType::INT32 || page_num_ == 0){
                 hash_ = INVALID_HASH;
@@ -76,7 +99,7 @@ public:
                 for(size_t i=0; i<SAMPLE_SIZE; i++){
                     size_t page_index = static_cast<size_t>(std::round(i * page_step));
                     const Page* page = column.pages[page_index];
-                    uint16_t non_null_count = getNonNullCount(page);
+                    uint16_t non_null_count = *(uint16_t*)(page->data+2);
                     if(non_null_count==0){
                         samples_.push_back(*(uint32_t*)(page->data));
                     } else if(non_null_count==1){
@@ -102,14 +125,13 @@ public:
                 }
 
                 samples_.resize(sample_size,0);
-                gatherContinuousColWithIndex(std::make_tuple(&column, 0, 0), 2*sample_size,
+                ContinuousColumn(&column, 0, 0).gather(2*sample_size,
                     (uint8_t*)samples_.data(), sizeof(uint32_t), sample_row_idx.data());
             }
 
             hash_ = hash_range(samples_.begin(),samples_.end());
         }
 
-        // Equality comparison operator.
         bool operator==(const ColumnSample &other) const {
             return type_ == other.type_
                 && page_num_ == other.page_num_
@@ -122,19 +144,32 @@ public:
         }
     };
 
-    // Sampling multiple columns in a table.
+    /**
+     * @class TableSample
+     * @brief A container for `ColumnSample`s from a single table.
+     */
     class TableSample{
     public:
         size_t                          num_rows_{0};
         std::map<size_t,ColumnSample>   column_samples_;
     };
 
-    // DONT_CACHE: Do not cache. The node might be a scan, the build side of the join might contain VARCHAR, the depth might be too large, or it might have been released.
-    // NEED_CACHE: Needs caching. Indicates that this node desires to be cached. After cache lookup and actual execution, it becomes USE_CACHE or OWN_CACHE.
-    // USE_CACHE: Using cache. The corresponding hashmaps_ entry stores the cached hash table.
-    // OWN_CACHE: Owns the cache. The corresponding hashmaps_ entry stores the hash table generated during the execution of this statement.
-    enum CacheType{DONT_CACHE, NEED_CACHE, USE_CACHE, OWN_CACHE};
+    /**
+     * @enum CacheType
+     * @brief Describes the caching status of a join node within this query.
+     */
+    enum CacheType {
+        DONT_CACHE, /// Do not cache. The node might be a scan, the build side of the join might contain VARCHAR, the depth might be too large, or it might have been released.
+        NEED_CACHE, /// A candidate for caching, pending lookup in the global cache. Indicates that this node desires to be cached. After cache lookup and actual execution, it becomes USE_CACHE or OWN_CACHE.
+        USE_CACHE,  /// Cache hit. This node will use a pre-built hash table from the cache.
+        OWN_CACHE   /// Cache miss. This node will build a new hash table and offer it to the cache. The corresponding hashmaps_ entry stores the hash table generated during the execution of this statement.
+    };
 
+    /**
+     * @brief Analyzes a plan to prepare it for caching logic.
+     * @param plan The logical query plan.
+     * @param input An optional alternative set of input tables.
+     */
     QueryCache(const Plan& plan, const std::vector<ColumnarTable>* input=nullptr)
     : nodes_(plan.nodes), root(plan.root), hashes_(plan.nodes.size(),INVALID_HASH),
     cache_types_(plan.nodes.size(),DONT_CACHE), node_depth_(plan.nodes.size(),0), hashmaps_(plan.nodes.size(),nullptr){
@@ -161,6 +196,7 @@ public:
         }
     }
 
+    /// @brief Prints the caching information for this query for debugging.
     void print() const{
         // Print the hash value and type of the node.
         for(size_t i=0; i<nodes_.size(); i++){
@@ -197,25 +233,25 @@ public:
         }
     }
 
-    // Generate a hash table.
+    /// @brief Marks a node to build a new hash table that will be owned by the cache.
     inline void generateCache(size_t node_id){
         cache_types_[node_id] = OWN_CACHE;
         hashmaps_[node_id] = new Hashmap();
     }
 
-    // Generate a hash table, but do not keep it as a cache.
+    /// @brief Marks a node to build a temporary hash table that will not be cached.
     inline void generateTmpCache(size_t node_id){
         cache_types_[node_id] = DONT_CACHE;
         hashmaps_[node_id] = new Hashmap();
     }
 
-    // Use a hash table from the cache.
+    /// @brief Marks a node to use an existing hash table from the cache.
     inline void setCache(size_t node_id, Hashmap* hashmap){
         cache_types_[node_id] = USE_CACHE;
         hashmaps_[node_id] = hashmap;
     }
 
-    // Invalidate the cache on this node (if any).
+    /// @brief Invalidates the cache status of a node and frees its hashmap if it's not from the global cache.
     inline void invalidCache(size_t node_id){
         if(cache_types_[node_id] != USE_CACHE && hashmaps_[node_id]!= nullptr){
             delete hashmaps_[node_id];
@@ -224,6 +260,7 @@ public:
         cache_types_[node_id] = DONT_CACHE;
     }
 
+    /// @brief Checks if a join node should be implemented as a NaiveJoin due to a 1-row build side.
     inline bool isNaiveJoin(size_t node_id){
         if(!isJoinNode(node_id)){
             return false;
@@ -265,7 +302,15 @@ public:
         return std::holds_alternative<JoinNode>(nodes_[node_id].data);
     }
 
-    // Check if the specified nodes (their outputs) in two queries are identical.
+    /**
+     * @brief Recursively checks if a sub-plan in this query is identical to a sub-plan in another query.
+     *
+     * The check is probabilistic, comparing node hashes (which depend on data samples).
+     * @param node_id The root of the sub-plan in this query.
+     * @param other_query The other query to compare against.
+     * @param other_node_id The root of the sub-plan in the other query.
+     * @return `true` if the sub-plans are considered identical.
+     */
     bool isSame(size_t node_id, const QueryCache* other_query, size_t other_node_id) const{
         uint64_t this_hash = hashes_[node_id];
         uint64_t other_hash = other_query->hashes_[other_node_id];
@@ -317,7 +362,10 @@ public:
         return true;
     }
 
-    // Check if the build sides of the specified Join nodes in two queries are identical.
+    /**
+     * @brief Checks if the build sides of two join nodes are identical.
+     * This is the key check for determining if a hash table can be reused.
+     */
     bool isBuildSideSame(size_t node_id, const QueryCache* other_query, size_t other_node_id) const{
         if(!isJoinNode(node_id) || !other_query->isJoinNode(other_node_id)){
             return false;
@@ -330,7 +378,7 @@ public:
         return isSame(build_node, other_query, other_build_node);
     }
 
-    // Get the size of the hash tables saved by this query.
+    /// @brief Get the size of the hash tables saved by this query.
     size_t getCacheSize() const{
         size_t total_size=0;
         for(size_t i=0; i<cache_types_.size(); i++){
@@ -379,7 +427,7 @@ private:
         return inputs_sample_[table_id].num_rows_;
     }
 
-    // Calculate the hash value of the node_id in nodes_, based on the already calculated hash values in the current QueryCache.
+    /// @brief Calculate the hash value of the node_id in nodes_, based on the already calculated hash values in the current QueryCache.
     uint64_t calculateNodeHash(const Plan& plan, size_t node_id, const std::vector<ColumnarTable>* input){
         if(hashes_[node_id] != INVALID_HASH){
             return hashes_[node_id];
@@ -450,16 +498,23 @@ private:
 };
 
 
-// Responsible for hash table cache lookup and eviction.
+/**
+ * @class CacheManager
+ * @brief Manages the global cache of hash tables.
+ *
+ * This class is responsible for storing, looking up, and evicting cached `Hashmap`s
+ * from completed queries. It uses a Least Recently Used (LRU) policy for eviction
+ * when the total cache size exceeds a defined limit.
+ */
 class CacheManager{
-    // All saved QueryCache instances. The last one is the most recently used; the first one is evicted.
+    /// @brief A history of all processed `QueryCache` objects.
     std::vector<QueryCache*> queries_;
 
-    // Use a list to store the hash table cache. The front contains the least recently used hash table, and the back contains the most recently used.
-    // pair<index in queries_, index in QueryCache.hashmaps_>
+    /// @brief An LRU list of cached hashmaps. The back is most-recently-used.
+    /// The pair stores `{index_into_queries_, node_index_within_that_query}`.
     std::list<std::pair<size_t, size_t>> hashmap_caches_;
 
-    // unordered_map is used to map node hash values to iterators in the list for easy lookup and move operations.
+    /// @brief A map for O(1) lookup of cached hashmaps by their build-side hash.
     std::unordered_map<uint64_t, std::list<std::pair<size_t, size_t>>::iterator> caches_map_;
 
     inline static const size_t MAX_CACHE_SIZE = 1024ULL * 1024 * 1024 * 20;    // Maximum cache size in bytes, up to 20GB.
@@ -473,7 +528,16 @@ public:
         }
     }
 
-    // Generate a query. Use possible caches for this query.
+    /**
+     * @brief Factory method to create a `QueryCache` object for a new plan.
+     *
+     * This method orchestrates the cache lookup process. It creates a `QueryCache`
+     * and then, for each join node that is a caching candidate, it checks if a
+     * matching hash table already exists in the manager.
+     * @param plan The query plan to process.
+     * @return A new `QueryCache` object, configured to either use existing cache
+     *         entries or generate new ones.
+     */
     QueryCache* getQuery(const Plan& plan, const std::vector<ColumnarTable>* input=nullptr){
         QueryCache* query = new QueryCache(plan,input);
 
