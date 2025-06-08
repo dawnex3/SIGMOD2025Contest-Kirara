@@ -4,13 +4,13 @@
 
 Our team is composed of passionate students dedicated to high-performance database systems.
 
-| Name             | University                      | Contact             |
-|------------------|---------------------------------|---------------------|
-| **Xiang Liming** | Beijing Institute of Technology | `dawnex@163.com`    |
-| Feng Jing        | Beijing Institute of Technology | `1330827323@qq.com` |
-| Shao Yibo        | Beijing Institute of Technology | `1626295293@qq.com` |
-| Yu Yongze        | Xidian University               | `uuz163@gmail.com`  |
-| Hou Jiaxi        | Beijing Institute of Technology | `[TODO]`            |
+| Name             | University                      | Contact                    |
+|------------------|---------------------------------|----------------------------|
+| **Xiang Liming** | Beijing Institute of Technology | `dawnex@163.com`           |
+| Feng Jing        | Beijing Institute of Technology | `1330827323@qq.com`        |
+| Shao Yibo        | Beijing Institute of Technology | `1626295293@qq.com`        |
+| Yu Yongze        | Xidian University               | `uuz163@gmail.com`         |
+| Hou Jiaxi        | Beijing Institute of Technology | `jiaxihou0122@outlook.com` |
 
 We are always open to collaboration and feedback!
 
