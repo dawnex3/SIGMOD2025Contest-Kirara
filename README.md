@@ -103,7 +103,9 @@ We are always open to collaboration and feedback!
 
 * Tasks can be assigned to specific threads using thread IDs, helping to minimize contention and potential conflicts between threads.
 
-## Acknowledgment
+## Acknowledgments
+
+We would like to express our sincere gratitude to our mentor, **[Professor Hongchao Qin](https://qinhc.github.io/)** of the Beijing Institute of Technology. While this project was developed entirely by the student team, his mentorship and support were invaluable.
 
 Our approach draws inspiration from and builds upon the concepts presented in several influential researches. We would like to express our sincere gratitude to the authors of the following key papers for their invaluable insights:
 
