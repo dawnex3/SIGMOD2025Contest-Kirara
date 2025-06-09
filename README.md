@@ -45,7 +45,7 @@ We are always open to collaboration and feedback!
 
 ### Operator Construction
 
-* There are four types of operators: `Scan`, `HashJoin`, and `NaiveJoin`.
+* There are four types of operators: `Scan`, `HashJoin`, `NaiveJoin` and `ResultWriter`.
 
   * `Scan` is responsible for reading data.
   * `HashJoin` performs join operations using a hash table.
