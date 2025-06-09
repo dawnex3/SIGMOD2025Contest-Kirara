@@ -1,42 +1,38 @@
-# TeamKirara
+# SIGMOD Contest 2025 Runner-up Solution
+
+This project is **TeamKirara's** submission for the **SIGMOD Contest 2025**, achieving **2nd place** in the final evaluation. For detailed information on the contest problem, environment, and execution instructions, please refer to the official [SIGMOD Contest 2025 website](https://sigmod-contest-2025.github.io/).
 
 ## Team Members
 
 Our team is composed of passionate students dedicated to high-performance database systems.
 
-| Name             | University                      | Contact                    |
-|------------------|---------------------------------|----------------------------|
-| **Xiang Liming** | Beijing Institute of Technology | `dawnex@163.com`           |
-| Feng Jing        | Beijing Institute of Technology | `1330827323@qq.com`        |
-| Shao Yibo        | Beijing Institute of Technology | `1626295293@qq.com`        |
-| Yu Yongze        | Xidian University               | `uuz163@gmail.com`         |
-| Hou Jiaxi        | Beijing Institute of Technology | `jiaxihou0122@outlook.com` |
+| Name         | University                      | Contact                    |
+|--------------|---------------------------------|----------------------------|
+| Xiang Liming | Beijing Institute of Technology | `dawnex@163.com`           |
+| Feng Jing    | Beijing Institute of Technology | `1330827323@qq.com`        |
+| Shao Yibo    | Beijing Institute of Technology | `1626295293@qq.com`        |
+| Yu Yongze    | Xidian University               | `uuz163@gmail.com`         |
+| Hou Jiaxi    | Beijing Institute of Technology | `jiaxihou0122@outlook.com` |
 
 We are always open to collaboration and feedback!
 
-## Features
+## Key Features
 
-This project is our submission for the **SIGMOD Contest 2025**, achieving **2nd place** in the final evaluation. For detailed information on the contest problem, environment, and execution instructions, please refer to the official [SIGMOD Contest 2025 website](https://sigmod-contest-2025.github.io/).
-
-### Key Features
-
-*   **Vectorized Volcano-Style Execution Engine**: Implements a modern, pull-based query processing model. The engine is composed of physical operators (`Scan`, `HashJoin`, etc.) that each process data in batches (`OperatorResultTable`). The query plan is executed by pulling results from the root, creating a highly efficient, demand-driven data flow.
-
-*   **Correct Handling of the Provided Page Structure**: The engine correctly parses and processes the contest-provided paged data layout. This includes accurately reading fixed-width values, handling nullability bitmaps, and resolving variable-length string data from its complex, paged representation.
+*   **Vectorized Volcano-Style Execution Engine**: Implements a modern, pull-based query processing model. The engine is composed of physical operators that each process data in batches. The query plan is executed by pulling results from the root, creating a highly efficient, demand-driven data flow.
 
 *   **Optimized Columnar Abstraction with Delayed Materialization**:
-    *   **Unified Column Interface**: A carefully designed `ColumnInterface` abstraction allows operators to process data transparently, regardless of its physical storage.
-    *   **Delayed Materialization**: The engine defaults to using `ContinuousColumn`, which reads data directly from the original paged storage on demand. Data is only copied into a contiguous buffer (`InstantiatedColumn`) when absolutely necessary. This strategy of **delaying materialization** significantly reduces data copying overhead and memory footprint throughout the query pipeline.
+    *   **Unified Column Interface**: A carefully designed column abstraction allows operators to process data transparently, regardless of its physical storage.
+    *   **Delayed Materialization**: By default, operators pass lightweight views which simply reference data locations within the original pages. Data is only materialized into a dense, contiguous buffer when an operation explicitly requires it. This strategy of **delaying materialization** significantly reduces data copying overhead and memory footprint throughout the query pipeline.
 
 *   **Advanced Parallel Execution & Synchronization**:
-    *   **Parallel-Aware Operators**: Core operators like `Scan` and `HashJoin` are designed for multi-threaded execution, using atomic operations for task distribution and resumable stages to fit the iterator model.
-    *   **Adaptive Join Strategy**: The engine automatically selects the optimal join algorithm, such as using a highly-optimized `NaiveJoin` for single-row build sides to avoid hash table overhead.
+    *   **Parallel-Aware Operators**: All operators are designed for multi-thread execution, using atomic operations for task distribution and resumable stages to fit the volcano model.
+    *   **Adaptive Join Strategy**: The engine automatically selects the optimal join algorithm, such as using an optimized Nested-Loop Join for single-row build sides to avoid hash table overhead.
     *   **Hierarchical Barrier**: A custom tree-structured barrier is used for efficient, low-overhead synchronization of a large number of worker threads.
     *   **Task-Based Thread Pool**: A static thread pool manages a fixed set of worker threads, allowing for fine-grained task assignment and execution on multi-core systems.
 
 *   **High-Performance Memory Management**:
-    *   **Two-Level Memory Pool**: A high-performance memory system featuring a `GlobalPool` that pre-allocates a large memory block (optionally with huge pages) and `thread_local` allocators that serve requests via fast, lock-free pointer bumping.
-    *   **Custom STL Allocators**: Provides a `LocalVector<T>` alias, allowing standard containers to benefit from the high-performance memory pool, drastically reducing the overhead of `malloc`/`free`.
+    *   **Two-Level Memory Pool**: A high-performance memory pool that pre-allocates a large memory block (optionally with huge pages). Each worker thread then carves out its own private sub-pool, enabling ultra-fast, lock-free allocations via simple pointer arithmetic.
+    *   **Custom STL Allocators**: Standard containers like std::vector can be easily configured to use this custom memory system, bypassing the overhead of conventional malloc/free calls and benefiting directly from the pool's performance.
 
 *   **Highly Parallelized with SIMD**:
     *   Extensive use of SIMD (Single Instruction, Multiple Data) intrinsics to accelerate core computational primitives and data processing operations.
@@ -49,17 +45,28 @@ This project is our submission for the **SIGMOD Contest 2025**, achieving **2nd 
 
 ### Operator Construction
 
-* There are three types of operators: `Scan`, `HashJoin`, and `NaiveJoin`.
+* There are four types of operators: `Scan`, `HashJoin`, and `NaiveJoin`.
 
   * `Scan` is responsible for reading data.
   * `HashJoin` performs join operations using a hash table.
-  * `NaiveJoin` is a simpler join method used in certain cases.
+  * `NaiveJoin` is a simple nested-loop join for when one side has just one row.
+  * `ResultWriter` is responsible for pulling all results from the pipeline and assembling the final output table.
 
-* The `HashJoin` operator selects the smaller input as the Build Side and the larger one as the Probe Side. If the Build Side contains fewer than 1000 records, the system falls back to using the simpler `NaiveJoin`.
+* The `HashJoin` operator selects the smaller input as the Build Side and the larger one as the Probe Side. If the Build Side contains only one row, the system falls back to using the simpler `NaiveJoin`.
 
 * Both `HashJoin` and `NaiveJoin` pre-allocate buffers to store their join results efficiently.
 
 * Every thread maintains its own copy of the same operator tree. These operator trees are coordinated using a Shared State Manager to ensure consistent execution across threads.
+
+### Operator Execution
+
+* Operators follow a pull-based execution model: each operator actively pulls data from its upstream operator until there’s nothing left to process.
+
+* The `Scan` operator atomically claim large data 'chunks' and then process them locally into smaller, lock-free batches, which minimizes synchronization overhead.
+
+* The system uses late materialization: instead of copying data, `Scan` passes lightweight references upward in the operator tree. This data remains as references until an operator like `HashJoin` or `NaiveJoin` must materialize it into a temporary buffer to produce join results.
+
+* Finally, the `ResultWriter` pulls these materialized result batches, and writes the result into its own private, paged-format buffers. Once a thread's pipeline is exhausted, it briefly locks a shared result structure to append its locally generated pages.
 
 ### Hash Table Construction and Probing
 
@@ -70,14 +77,6 @@ This project is our submission for the **SIGMOD Contest 2025**, achieving **2nd 
 * The hash table is made up of multiple hash chains. Each chain holds key-value pairs with the same hash. To quickly check whether a chain might contain a given key, the first 16 bits of the chain's head pointer are repurposed as a mini Bloom filter.
 
 * To prevent concurrency issues, memory for key-value pairs is allocated outside the hash table. Once the construction is done, all entries are inserted into the table using lock-free CAS (Compare-And-Swap) operations.
-
-### Operator Execution
-
-* Operators follow a pull-based execution model: each operator actively pulls data from its upstream operator until there’s nothing left to process.
-
-* The `Scan` operator reads data in batches. To avoid conflicts between threads, each thread reserves a specific data batch in advance and pulls data from that batch during execution.
-
-* The system uses late materialization: instead of copying data, `Scan` passes references upward in the operator tree to reduce memory usage and improve performance.
 
 ### Caching Execution Results of Repeated Subtrees
 
@@ -106,8 +105,13 @@ This project is our submission for the **SIGMOD Contest 2025**, achieving **2nd 
 
 ## Acknowledgment
 
-This project draws inspiration from and builds upon the concepts presented in the paper "Everything You Always Wanted to Know About Compiled and Vectorized Queries But Were Afraid to Ask" by Timo Kersten, Viktor Leis, Alfons Kemper, Thomas Neumann, Andrew Pavlo and Peter Boncz. We express our gratitude to the authors for their foundational work, which has significantly informed our approach.
-Additionally, portions of this project reference the open-source code repository located at https://github.com/TimoKersten/db-engine-paradigms/.
+Our approach draws inspiration from and builds upon the concepts presented in several influential researches. We would like to express our sincere gratitude to the authors of the following key papers for their invaluable insights:
+
+* "Everything You Always Wanted to Know About Compiled and Vectorized Queries But Were Afraid to Ask" by Timo Kersten, Viktor Leis, Alfons Kemper, Thomas Neumann, Andrew Pavlo, and Peter Boncz.
+
+* "To Partition, or Not to Partition, That is the Join Question in a Real System" by Maximilian Bandle, Jana Giceva, and Thomas Neumann.
+
+Additionally, our implementation references the open-source code from the repository https://github.com/TimoKersten/db-engine-paradigms/, and we thank its contributors for making their work available.
 
 # SIGMOD Contest 2025
 
