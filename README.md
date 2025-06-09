@@ -45,6 +45,65 @@ This project is our submission for the **SIGMOD Contest 2025**, achieving **2nd 
     *   **Comprehensive Code-Level Documentation**: The codebase is thoroughly documented with standardized, Doxygen-style comments to facilitate understanding and maintenance.
     *   **Built-in, Multi-Threaded Profiler**: A thread-safe profiler allows for detailed performance analysis of events and operator statistics (e.g., input/output row counts) on a per-thread basis, crucial for identifying bottlenecks.
 
+## Implementation Details
+
+### Operator Construction
+
+* There are three types of operators: `Scan`, `HashJoin`, and `NaiveJoin`.
+
+  * `Scan` is responsible for reading data.
+  * `HashJoin` performs join operations using a hash table.
+  * `NaiveJoin` is a simpler join method used in certain cases.
+
+* The `HashJoin` operator selects the smaller input as the Build Side and the larger one as the Probe Side. If the Build Side contains fewer than 1000 records, the system falls back to using the simpler `NaiveJoin`.
+
+* Both `HashJoin` and `NaiveJoin` pre-allocate buffers to store their join results efficiently.
+
+* Every thread maintains its own copy of the same operator tree. These operator trees are coordinated using a Shared State Manager to ensure consistent execution across threads.
+
+### Hash Table Construction and Probing
+
+* The hash table is built from the smaller input side of the `HashJoin`. During probing, vectorized instructions (via Clang extensions) are used to compare keys in batches, improving performance.
+
+* Multiple threads build the hash table in parallel, with each thread responsible for part of the data.
+
+* The hash table is made up of multiple hash chains. Each chain holds key-value pairs with the same hash. To quickly check whether a chain might contain a given key, the first 16 bits of the chain's head pointer are repurposed as a mini Bloom filter.
+
+* To prevent concurrency issues, memory for key-value pairs is allocated outside the hash table. Once the construction is done, all entries are inserted into the table using lock-free CAS (Compare-And-Swap) operations.
+
+### Operator Execution
+
+* Operators follow a pull-based execution model: each operator actively pulls data from its upstream operator until there’s nothing left to process.
+
+* The `Scan` operator reads data in batches. To avoid conflicts between threads, each thread reserves a specific data batch in advance and pulls data from that batch during execution.
+
+* The system uses late materialization: instead of copying data, `Scan` passes references upward in the operator tree to reduce memory usage and improve performance.
+
+### Caching Execution Results of Repeated Subtrees
+
+* Many query plans contain identical subtrees. By caching the execution results of these repeated subtrees, the system can reduce redundant computation and improve performance.
+
+* The cache works like a hash table:
+
+  * The key is a hash value derived from the structure of the subtree and samples of its input data.
+  * The value is the result produced by executing the subtree.
+
+* An LRU (Least Recently Used) policy is used to evict outdated entries when the cache is full.
+
+### Memory Allocation and Pooling
+
+* A global memory pool is used to handle SQL memory needs. Before execution begins, the pool pre-allocates a large memory block for the query.
+
+* Each thread has its own allocator that requests memory from the global pool. Memory is allocated using a lock-free pointer increment method.
+
+* When query execution finishes, all memory is released in one go. This design avoids frequent allocation/deallocation and helps reduce fragmentation.
+
+### Thread Management
+
+* A static thread pool is used to manage all threads. The number of threads is fixed, which avoids the overhead of creating and destroying threads repeatedly.
+
+* Tasks can be assigned to specific threads using thread IDs, helping to minimize contention and potential conflicts between threads.
+
 ## Acknowledgment
 
 This project draws inspiration from and builds upon the concepts presented in the paper "Everything You Always Wanted to Know About Compiled and Vectorized Queries But Were Afraid to Ask" by Timo Kersten, Viktor Leis, Alfons Kemper, Thomas Neumann, Andrew Pavlo and Peter Boncz. We express our gratitude to the authors for their foundational work, which has significantly informed our approach.
