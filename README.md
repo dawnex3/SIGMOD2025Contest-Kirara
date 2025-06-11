@@ -1,6 +1,11 @@
 # SIGMOD Contest 2025 Runner-up Solution
 
-This project is **TeamKirara's** submission for the **SIGMOD Contest 2025**, achieving **2nd place** in the final evaluation. For detailed information on the contest problem, environment, and execution instructions, please refer to the official [SIGMOD Contest 2025 website](https://sigmod-contest-2025.github.io/).
+> [!IMPORTANT]
+> 
+> This branch is a prototype implementation of our team's push-based execution engine. It is not the final submitted implementation and it's not fully tested.
+
+We tried a push-based execution engine during the contest and implemented a simple prototype, here are some notes from the implementation.
+
 
 ## Team Members
 
@@ -16,92 +21,11 @@ Our team is composed of passionate students dedicated to high-performance databa
 
 We are always open to collaboration and feedback!
 
-## Key Features
-
-*   **Vectorized Volcano-Style Execution Engine**: Implements a modern, pull-based query processing model. The engine is composed of physical operators that each process data in batches. The query plan is executed by pulling results from the root, creating a highly efficient, demand-driven data flow.
-
-*   **Optimized Columnar Abstraction with Delayed Materialization**:
-    *   **Unified Column Interface**: A carefully designed column abstraction allows operators to process data transparently, regardless of its physical storage.
-    *   **Delayed Materialization**: By default, operators pass lightweight views which simply reference data locations within the original pages. Data is only materialized into a dense, contiguous buffer when an operation explicitly requires it. This strategy of **delaying materialization** significantly reduces data copying overhead and memory footprint throughout the query pipeline.
-
-*   **Advanced Parallel Execution & Synchronization**:
-    *   **Parallel-Aware Operators**: All operators are designed for multi-thread execution, using atomic operations for task distribution and resumable stages to fit the volcano model.
-    *   **Adaptive Join Strategy**: The engine automatically selects the optimal join algorithm, such as using an optimized Nested-Loop Join for single-row build sides to avoid hash table overhead.
-    *   **Hierarchical Barrier**: A custom tree-structured barrier is used for efficient, low-overhead synchronization of a large number of worker threads.
-    *   **Task-Based Thread Pool**: A static thread pool manages a fixed set of worker threads, allowing for fine-grained task assignment and execution on multi-core systems.
-
-*   **High-Performance Memory Management**:
-    *   **Two-Level Memory Pool**: A high-performance memory pool that pre-allocates a large memory block (optionally with huge pages). Each worker thread then carves out its own private sub-pool, enabling ultra-fast, lock-free allocations via simple pointer arithmetic.
-    *   **Custom STL Allocators**: Standard containers like std::vector can be easily configured to use this custom memory system, bypassing the overhead of conventional malloc/free calls and benefiting directly from the pool's performance.
-
-*   **Highly Parallelized with SIMD**:
-    *   Extensive use of SIMD (Single Instruction, Multiple Data) intrinsics to accelerate core computational primitives and data processing operations.
-
-*   **Developer-Friendly Tooling**:
-    *   **Comprehensive Code-Level Documentation**: The codebase is thoroughly documented with standardized, Doxygen-style comments to facilitate understanding and maintenance.
-    *   **Built-in, Multi-Threaded Profiler**: A thread-safe profiler allows for detailed performance analysis of events and operator statistics (e.g., input/output row counts) on a per-thread basis, crucial for identifying bottlenecks.
-
-## Implementation Details
-
-### Operator Construction
-
-* There are four types of operators: `Scan`, `HashJoin`, `NaiveJoin` and `ResultWriter`.
-
-  * `Scan` is responsible for reading data.
-  * `HashJoin` performs join operations using a hash table.
-  * `NaiveJoin` is a simple nested-loop join for when one side has just one row.
-  * `ResultWriter` is responsible for pulling all results from the pipeline and assembling the final output table.
-
-* The `HashJoin` operator selects the smaller input as the Build Side and the larger one as the Probe Side. If the Build Side contains only one row, the system falls back to using the simpler `NaiveJoin`.
-
-* Both `HashJoin` and `NaiveJoin` pre-allocate buffers to store their join results efficiently.
-
-* Every thread maintains its own copy of the same operator tree. These operator trees are coordinated using a Shared State Manager to ensure consistent execution across threads.
-
-### Operator Execution
-
-* Operators follow a pull-based execution model: each operator actively pulls data from its upstream operator until there’s nothing left to process.
-
-* The `Scan` operator atomically claim large data 'chunks' and then process them locally into smaller, lock-free batches, which minimizes synchronization overhead.
-
-* The system uses late materialization: instead of copying data, `Scan` passes lightweight references upward in the operator tree. This data remains as references until an operator like `HashJoin` or `NaiveJoin` must materialize it into a temporary buffer to produce join results.
-
-* Finally, the `ResultWriter` pulls these materialized result batches, and writes the result into its own private, paged-format buffers. Once a thread's pipeline is exhausted, it briefly locks a shared result structure to append its locally generated pages.
-
-### Hash Table Construction and Probing
-
-* The hash table is built from the smaller input side of the `HashJoin`. During probing, vectorized instructions (via Clang extensions) are used to compare keys in batches, improving performance.
-
-* Multiple threads build the hash table in parallel, with each thread responsible for part of the data.
-
-* The hash table is made up of multiple hash chains. Each chain holds key-value pairs with the same hash. To quickly check whether a chain might contain a given key, the first 16 bits of the chain's head pointer are repurposed as a mini Bloom filter.
-
-* To prevent concurrency issues, memory for key-value pairs is allocated outside the hash table. Once the construction is done, all entries are inserted into the table using lock-free CAS (Compare-And-Swap) operations.
-
-### Caching Execution Results of Repeated Subtrees
-
-* Many query plans contain identical subtrees. By caching the execution results of these repeated subtrees, the system can reduce redundant computation and improve performance.
-
-* The cache works like a hash table:
-
-  * The key is a hash value derived from the structure of the subtree and samples of its input data.
-  * The value is the result produced by executing the subtree.
-
-* An LRU (Least Recently Used) policy is used to evict outdated entries when the cache is full.
-
-### Memory Allocation and Pooling
-
-* A global memory pool is used to handle SQL memory needs. Before execution begins, the pool pre-allocates a large memory block for the query.
-
-* Each thread has its own allocator that requests memory from the global pool. Memory is allocated using a lock-free pointer increment method.
-
-* When query execution finishes, all memory is released in one go. This design avoids frequent allocation/deallocation and helps reduce fragmentation.
-
-### Thread Management
-
-* A static thread pool is used to manage all threads. The number of threads is fixed, which avoids the overhead of creating and destroying threads repeatedly.
-
-* Tasks can be assigned to specific threads using thread IDs, helping to minimize contention and potential conflicts between threads.
+## Notes
+*   **Morsel-Driven:** Queries are processed on small, independent chunks of data (morsels or partitions), enabling fine-grained parallelism and better cache utilization.
+*   **Parallel Push-Based Execution:** A scheduler decomposes query plans into pipelines (in this contest, there two kinds of pipelines: `ScanProbeTabularPipeline` and `ScanProbeBuildPipeline`) and dispatches tasks (morsels) to a pool of worker threads for concurrent execution. Operators in pipelines push data to downstream operators as soon as it's processed, minimizing control overhead and promoting data flow.
+* **Column Vectors & Page Abstraction:** Designed to work with data stored in a paged format, with specialized readers for fixed-width types and different string encodings (compact and long strings).
+*   **Hash-Based Joins:** HashJoin is implemented using `ChainedHashMap` with segment vectors for concurrent hash table construction.
 
 ## Acknowledgments
 
@@ -112,6 +36,8 @@ Our approach draws inspiration from and builds upon the concepts presented in se
 * "Everything You Always Wanted to Know About Compiled and Vectorized Queries But Were Afraid to Ask" by Timo Kersten, Viktor Leis, Alfons Kemper, Thomas Neumann, Andrew Pavlo, and Peter Boncz.
 
 * "To Partition, or Not to Partition, That is the Join Question in a Real System" by Maximilian Bandle, Jana Giceva, and Thomas Neumann.
+
+* "Morsel-Driven Parallelism: A NUMA-Aware Query Evaluation Framework for the Many-Core Age" by Viktor Leis, Peter Boncz, Alfons Kemper, and Thomas Neumann,
 
 Additionally, our implementation references the open-source code from the repository https://github.com/TimoKersten/db-engine-paradigms/, and we thank its contributors for making their work available.
 
